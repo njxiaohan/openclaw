@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatExtensionHostTtsStatusText,
   resolveExtensionHostTtsStatusSnapshot,
   setExtensionHostLastTtsAttempt,
 } from "./tts-status.js";
+
+vi.mock("./runtime-backend-catalog.js", () => ({
+  listExtensionHostTtsRuntimeBackendIds: vi.fn(() => ["openai", "elevenlabs", "edge"]),
+}));
 
 describe("tts-status", () => {
   it("builds a status snapshot from host-owned preferences and runtime state", () => {

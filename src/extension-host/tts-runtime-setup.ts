@@ -1,10 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { TtsProvider } from "../config/types.tts.js";
+import { listExtensionHostTtsRuntimeBackendIds } from "./runtime-backend-catalog.js";
 import type { ResolvedTtsConfig } from "./tts-config.js";
-import {
-  resolveExtensionHostTtsApiKey,
-  resolveExtensionHostTtsProviderOrder,
-} from "./tts-runtime-registry.js";
+import { resolveExtensionHostTtsApiKey } from "./tts-runtime-registry.js";
 
 type TtsUserPrefs = {
   tts?: {
@@ -67,8 +65,9 @@ export function resolveExtensionHostTtsRequestSetup(params: {
 
   const provider =
     params.providerOverride ?? resolveExtensionHostTtsProvider(params.config, params.prefsPath);
+  const providerOrder = listExtensionHostTtsRuntimeBackendIds();
   return {
     config: params.config,
-    providers: resolveExtensionHostTtsProviderOrder(provider),
+    providers: [provider, ...providerOrder.filter((candidate) => candidate !== provider)],
   };
 }

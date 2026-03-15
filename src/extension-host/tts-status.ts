@@ -1,4 +1,5 @@
 import type { TtsProvider } from "../config/types.tts.js";
+import { listExtensionHostTtsRuntimeBackendIds } from "./runtime-backend-catalog.js";
 import type { ResolvedTtsConfig } from "./tts-config.js";
 import {
   getExtensionHostTtsMaxLength,
@@ -9,7 +10,6 @@ import {
 import {
   isExtensionHostTtsProviderConfigured,
   resolveExtensionHostTtsApiKey,
-  resolveExtensionHostTtsProviderOrder,
 } from "./tts-runtime-registry.js";
 import { resolveExtensionHostTtsProvider } from "./tts-runtime-setup.js";
 
@@ -57,8 +57,8 @@ export function resolveExtensionHostTtsStatusSnapshot(params: {
 }): ExtensionHostTtsStatusSnapshot {
   const { config, prefsPath } = params;
   const provider = resolveExtensionHostTtsProvider(config, prefsPath);
-  const fallbackProviders = resolveExtensionHostTtsProviderOrder(provider)
-    .slice(1)
+  const fallbackProviders = listExtensionHostTtsRuntimeBackendIds()
+    .filter((candidate) => candidate !== provider)
     .filter((candidate) => isExtensionHostTtsProviderConfigured(config, candidate));
   return {
     enabled: isExtensionHostTtsEnabled(config, prefsPath),

@@ -1,3 +1,4 @@
+import type { TtsProvider } from "../config/types.tts.js";
 import type { MediaUnderstandingCapability } from "../media-understanding/types.js";
 import { EXTENSION_HOST_REMOTE_EMBEDDING_PROVIDER_IDS } from "./embedding-runtime-registry.js";
 import type { EmbeddingProviderId } from "./embedding-runtime-types.js";
@@ -119,6 +120,12 @@ export function listExtensionHostTtsRuntimeBackendCatalogEntries(): readonly Ext
       supportsTelephony: provider.supportsTelephony,
     },
   }));
+}
+
+export function listExtensionHostTtsRuntimeBackendIds(): readonly TtsProvider[] {
+  return listExtensionHostTtsRuntimeBackendCatalogEntries().map(
+    (entry) => entry.backendId as TtsProvider,
+  );
 }
 
 export function listExtensionHostRuntimeBackendCatalogEntries(): readonly ExtensionHostRuntimeBackendCatalogEntry[] {

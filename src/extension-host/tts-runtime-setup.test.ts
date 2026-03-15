@@ -1,13 +1,17 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { withEnv } from "../test-utils/env.js";
 import type { ResolvedTtsConfig } from "./tts-config.js";
 import {
   resolveExtensionHostTtsProvider,
   resolveExtensionHostTtsRequestSetup,
 } from "./tts-runtime-setup.js";
+
+vi.mock("./runtime-backend-catalog.js", () => ({
+  listExtensionHostTtsRuntimeBackendIds: vi.fn(() => ["openai", "elevenlabs", "edge"]),
+}));
 
 const tempDirs: string[] = [];
 

@@ -102,6 +102,11 @@ describe("runtime-backend-catalog", () => {
     expect(entries.find((entry) => entry.backendId === "edge")?.capabilities).toEqual([
       "tts.synthesis",
     ]);
+    expect(catalog.listExtensionHostTtsRuntimeBackendIds()).toEqual([
+      "openai",
+      "elevenlabs",
+      "edge",
+    ]);
   });
 
   it("aggregates runtime-backend catalog entries across subsystem families", async () => {
