@@ -511,6 +511,8 @@ export const FIELD_LABELS: Record<string, string> = {
   "commands.ownerDisplay": "Owner ID Display",
   "commands.ownerDisplaySecret": "Owner ID Hash Secret", // pragma: allowlist secret
   "commands.allowFrom": "Command Elevated Access Rules",
+  mcp: "MCP",
+  "mcp.servers": "MCP Servers",
   ui: "UI",
   "ui.seamColor": "Accent Color",
   "ui.assistant": "Assistant Appearance",

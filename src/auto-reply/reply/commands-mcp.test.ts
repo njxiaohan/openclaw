@@ -31,7 +31,7 @@ describe("handleCommands /mcp", () => {
     );
   });
 
-  it("writes project MCP config and shows it back", async () => {
+  it("writes MCP config and shows it back", async () => {
     await withTempHome("openclaw-command-mcp-home-", async () => {
       const workspaceDir = await createWorkspace();
       const setParams = buildCommandTestParams(
@@ -75,7 +75,7 @@ describe("handleCommands /mcp", () => {
     });
   });
 
-  it("reports invalid stdio config", async () => {
+  it("accepts non-stdio MCP config at the config layer", async () => {
     await withTempHome("openclaw-command-mcp-home-", async () => {
       const workspaceDir = await createWorkspace();
       const params = buildCommandTestParams(
@@ -87,7 +87,7 @@ describe("handleCommands /mcp", () => {
       params.command.senderIsOwner = true;
 
       const result = await handleCommands(params);
-      expect(result.reply?.text).toContain("only stdio MCP servers are supported right now");
+      expect(result.reply?.text).toContain('MCP server "remote" saved');
     });
   });
 });

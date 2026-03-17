@@ -1,8 +1,8 @@
 import {
-  listProjectMcpServers,
-  setProjectMcpServer,
-  unsetProjectMcpServer,
-} from "../../agents/pi-project-mcp.js";
+  listConfiguredMcpServers,
+  setConfiguredMcpServer,
+  unsetConfiguredMcpServer,
+} from "../../config/mcp-config.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import {
   rejectNonOwnerCommand,
@@ -50,9 +50,7 @@ export const handleMcpCommand: CommandHandler = async (params, allowTextCommands
   }
 
   if (mcpCommand.action === "show") {
-    const loaded = await listProjectMcpServers({
-      workspaceDir: params.workspaceDir,
-    });
+    const loaded = await listConfiguredMcpServers();
     if (!loaded.ok) {
       return {
         shouldContinue: false,
@@ -77,13 +75,13 @@ export const handleMcpCommand: CommandHandler = async (params, allowTextCommands
     if (Object.keys(loaded.mcpServers).length === 0) {
       return {
         shouldContinue: false,
-        reply: { text: `🔌 No project MCP servers configured in ${loaded.path}.` },
+        reply: { text: `🔌 No MCP servers configured in ${loaded.path}.` },
       };
     }
     return {
       shouldContinue: false,
       reply: {
-        text: renderJsonBlock(`🔌 Project MCP servers (${loaded.path})`, loaded.mcpServers),
+        text: renderJsonBlock(`🔌 MCP servers (${loaded.path})`, loaded.mcpServers),
       },
     };
   }
@@ -98,8 +96,7 @@ export const handleMcpCommand: CommandHandler = async (params, allowTextCommands
   }
 
   if (mcpCommand.action === "set") {
-    const result = await setProjectMcpServer({
-      workspaceDir: params.workspaceDir,
+    const result = await setConfiguredMcpServer({
       name: mcpCommand.name,
       server: mcpCommand.value,
     });
@@ -117,10 +114,7 @@ export const handleMcpCommand: CommandHandler = async (params, allowTextCommands
     };
   }
 
-  const result = await unsetProjectMcpServer({
-    workspaceDir: params.workspaceDir,
-    name: mcpCommand.name,
-  });
+  const result = await unsetConfiguredMcpServer({ name: mcpCommand.name });
   if (!result.ok) {
     return {
       shouldContinue: false,

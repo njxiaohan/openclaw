@@ -127,6 +127,58 @@ describe("loadEnabledBundlePiSettingsSnapshot", () => {
     });
   });
 
+  it("lets top-level MCP config override bundle MCP defaults", async () => {
+    const workspaceDir = await tempDirs.make("openclaw-workspace-");
+    const pluginRoot = await tempDirs.make("openclaw-bundle-");
+    await fs.mkdir(path.join(pluginRoot, ".claude-plugin"), { recursive: true });
+    await fs.writeFile(
+      path.join(pluginRoot, ".claude-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "claude-bundle",
+      }),
+      "utf-8",
+    );
+    await fs.writeFile(
+      path.join(pluginRoot, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          sharedServer: {
+            command: "node",
+            args: ["./servers/bundle.mjs"],
+          },
+        },
+      }),
+      "utf-8",
+    );
+    hoisted.loadPluginManifestRegistry.mockReturnValue(
+      buildRegistry({ pluginRoot, settingsFiles: [] }),
+    );
+
+    const snapshot = loadEnabledBundlePiSettingsSnapshot({
+      cwd: workspaceDir,
+      cfg: {
+        mcp: {
+          servers: {
+            sharedServer: {
+              url: "https://example.com/mcp",
+            },
+          },
+        },
+        plugins: {
+          entries: {
+            "claude-bundle": { enabled: true },
+          },
+        },
+      },
+    });
+
+    expect(snapshot.mcpServers).toEqual({
+      sharedServer: {
+        url: "https://example.com/mcp",
+      },
+    });
+  });
+
   it("ignores disabled bundle plugins", async () => {
     const workspaceDir = await tempDirs.make("openclaw-workspace-");
     const pluginRoot = await tempDirs.make("openclaw-bundle-");

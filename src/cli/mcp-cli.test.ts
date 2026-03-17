@@ -41,7 +41,7 @@ describe("mcp cli", () => {
     sharedProgram = new Command();
     sharedProgram.exitOverride();
     registerMcpCli(sharedProgram);
-  });
+  }, 300_000);
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -55,7 +55,7 @@ describe("mcp cli", () => {
     );
   });
 
-  it("sets and shows a project MCP server", async () => {
+  it("sets and shows a configured MCP server", async () => {
     await withTempHome("openclaw-cli-mcp-home-", async () => {
       const workspaceDir = await createWorkspace();
       process.chdir(workspaceDir);

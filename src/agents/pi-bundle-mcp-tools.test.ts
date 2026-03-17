@@ -138,4 +138,47 @@ describe("createBundleMcpToolRuntime", () => {
       await runtime.dispose();
     }
   });
+
+  it("loads configured stdio MCP tools without a bundle", async () => {
+    const workspaceDir = await makeTempDir("openclaw-bundle-mcp-tools-");
+    const serverScriptPath = path.join(workspaceDir, "servers", "configured-probe.mjs");
+    await writeBundleProbeMcpServer(serverScriptPath);
+
+    const runtime = await createBundleMcpToolRuntime({
+      workspaceDir,
+      cfg: {
+        mcp: {
+          servers: {
+            configuredProbe: {
+              command: "node",
+              args: [serverScriptPath],
+              env: {
+                BUNDLE_PROBE_TEXT: "FROM-CONFIG",
+              },
+            },
+          },
+        },
+      },
+    });
+
+    try {
+      expect(runtime.tools.map((tool) => tool.name)).toEqual(["bundle_probe"]);
+      const result = await runtime.tools[0].execute(
+        "call-configured-probe",
+        {},
+        undefined,
+        undefined,
+      );
+      expect(result.content[0]).toMatchObject({
+        type: "text",
+        text: "FROM-CONFIG",
+      });
+      expect(result.details).toEqual({
+        mcpServer: "configuredProbe",
+        mcpTool: "bundle_probe",
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
 });

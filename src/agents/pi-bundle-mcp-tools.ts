@@ -4,7 +4,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { logDebug, logWarn } from "../logger.js";
-import { loadEnabledBundleMcpConfig } from "../plugins/bundle-mcp.js";
+import { loadEmbeddedPiMcpConfig } from "./embedded-pi-mcp.js";
 import {
   describeStdioMcpServerLaunchConfig,
   resolveStdioMcpServerLaunchConfig,
@@ -124,7 +124,7 @@ export async function createBundleMcpToolRuntime(params: {
   cfg?: OpenClawConfig;
   reservedToolNames?: Iterable<string>;
 }): Promise<BundleMcpToolRuntime> {
-  const loaded = loadEnabledBundleMcpConfig({
+  const loaded = loadEmbeddedPiMcpConfig({
     workspaceDir: params.workspaceDir,
     cfg: params.cfg,
   });
@@ -139,7 +139,7 @@ export async function createBundleMcpToolRuntime(params: {
   const tools: AnyAgentTool[] = [];
 
   try {
-    for (const [serverName, rawServer] of Object.entries(loaded.config.mcpServers)) {
+    for (const [serverName, rawServer] of Object.entries(loaded.mcpServers)) {
       const launch = resolveStdioMcpServerLaunchConfig(rawServer);
       if (!launch.ok) {
         logWarn(`bundle-mcp: skipped server "${serverName}" because ${launch.reason}.`);
