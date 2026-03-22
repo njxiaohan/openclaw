@@ -1,5 +1,4 @@
-import { callGateway } from "../../gateway/call.js";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
+import { probeGateway } from "../../gateway/probe.js";
 import { withProgress } from "../progress.js";
 
 export async function probeGatewayStatus(opts: {
@@ -12,26 +11,34 @@ export async function probeGatewayStatus(opts: {
   configPath?: string;
 }) {
   try {
-    await withProgress(
+    const result = await withProgress(
       {
         label: "Checking gateway status...",
         indeterminate: true,
         enabled: opts.json !== true,
       },
       async () =>
-        await callGateway({
+        await probeGateway({
           url: opts.url,
-          token: opts.token,
-          password: opts.password,
+          auth: {
+            token: opts.token,
+            password: opts.password,
+          },
           tlsFingerprint: opts.tlsFingerprint,
-          method: "status",
           timeoutMs: opts.timeoutMs,
-          clientName: GATEWAY_CLIENT_NAMES.CLI,
-          mode: GATEWAY_CLIENT_MODES.CLI,
-          ...(opts.configPath ? { configPath: opts.configPath } : {}),
+          includeDetails: false,
         }),
     );
-    return { ok: true } as const;
+    if (result.ok) {
+      return { ok: true } as const;
+    }
+    const closeHint = result.close
+      ? `gateway closed (${result.close.code}): ${result.close.reason}`
+      : null;
+    return {
+      ok: false,
+      error: result.error ?? closeHint ?? "gateway probe failed",
+    } as const;
   } catch (err) {
     return {
       ok: false,
