@@ -820,11 +820,7 @@ jobs:
       - name: Run ${{ matrix.task }} (${{ matrix.runtime }})
         run: ${{ matrix.command }}
 
-  # Consolidated macOS job: runs TS tests + Swift lint/build/test sequentially
-  # on a single runner. GitHub limits macOS concurrent jobs to 5 per org;
-  # running 4 separate jobs per PR (as before) starved the queue. One job
-  # per PR allows 5 PRs to run macOS checks simultaneously.
-  macos:
+  macos-node:
     needs: [scope]
     if: github.event_name == 'pull_request' && needs.scope.outputs.docs_only != 'true' && needs.scope.outputs.run_macos == 'true'
     runs-on: macos-latest
@@ -844,13 +840,23 @@ jobs:
       - name: Build dist (macOS)
         run: pnpm build
 
-      # --- Run all checks sequentially (fast gates first) ---
       - name: TS tests (macOS)
         env:
           NODE_OPTIONS: --max-old-space-size=4096
         run: pnpm test
 
-      # --- Xcode/Swift setup ---
+  macos-swift:
+    needs: [scope]
+    if: github.event_name == 'pull_request' && needs.scope.outputs.docs_only != 'true' && needs.scope.outputs.run_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: false
+
       - name: Select Xcode 26.1
         run: |
           sudo xcode-select -s /Applications/Xcode_26.1.app
