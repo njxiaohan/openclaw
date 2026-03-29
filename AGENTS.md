@@ -78,8 +78,8 @@
 
 ## Internal Development Docs
 
-- `docs/internal/**` is for internal-only development context that should stay in the repo but not on the public docs site.
-- Automatically create or update a note in `docs/internal/<github-username>/` when starting meaningful implementation work, refactors, migrations, architecture changes, or other development context that would otherwise be lost.
+- Internal-only development notes for OpenClaw now live in the sibling `../maintainers` repo under `docs/<github-username>/`.
+- Automatically create or update a note there when starting meaningful implementation work, refactors, migrations, architecture changes, or other development context that would otherwise be lost.
 - Default note types include implementation plans, refactor plans, migration plans, architecture notes, debugging notes, and other development context.
 - Infer `<github-username>` from the current authenticated GitHub user. Prefer the active GitHub login; if that cannot be resolved, fall back to the best available local git identity.
 - Use dated filenames: `YYYY-MM-DD-short-topic.md`.
@@ -87,8 +87,8 @@
 - When the author identity is known, prefer `author: "Name <email>"`.
 - Keep these notes in plain language.
 - Avoid deleting or rewriting someone else's internal notes unless there is a clear valid reason, such as an explicit user request, accidental duplicate content, secret removal, replacement by a newer note, or override by BDFL.
-- Do not place internal planning notes in public `docs/**` pages or revive `experiments/`; use `docs/internal/` instead.
-- Read `docs/internal/README.md` before creating or reorganizing internal development notes.
+- Do not place internal planning notes in `openclaw/docs/**` or revive `experiments/`; use `../maintainers/docs/` instead.
+- Read `../maintainers/docs/README.md` before creating or reorganizing internal development notes.
 
 ## Docs i18n (zh-CN)
 
