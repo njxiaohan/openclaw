@@ -404,7 +404,12 @@ function createBoundFlowRuntime(params: {
         progressSummary: input.progressSummary,
       });
       if (!created.created) {
-        return created;
+        return {
+          created: false,
+          found: created.found,
+          reason: created.reason ?? "Task was not created.",
+          ...(created.flow ? { flow: created.flow } : {}),
+        };
       }
       const managed = asManagedFlowRecord(created.flow);
       if (!managed) {
@@ -412,6 +417,14 @@ function createBoundFlowRuntime(params: {
           created: false,
           found: true,
           reason: "Flow does not accept managed child tasks.",
+          flow: created.flow,
+        };
+      }
+      if (!created.task) {
+        return {
+          created: false,
+          found: true,
+          reason: "Task was not created.",
           flow: created.flow,
         };
       }
