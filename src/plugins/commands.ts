@@ -27,7 +27,7 @@ import {
   getCurrentPluginConversationBinding,
   requestPluginConversationBinding,
 } from "./conversation-binding.js";
-import { getActivePluginChannelRegistry } from "./runtime.js";
+import { createPluginActorRef, createPluginLaneRef } from "./lane-refs.js";
 import type {
   OpenClawPluginCommandDefinition,
   PluginCommandContext,
@@ -191,6 +191,27 @@ export async function executePluginCommand(params: {
     messageThreadId: params.messageThreadId,
     threadParentId: params.threadParentId,
   });
+  const lane = createPluginLaneRef({
+    channel,
+    to:
+      bindingConversation?.conversationId ??
+      (params.to && params.to.startsWith("slash:") ? params.from : params.to) ??
+      params.from,
+    accountId: params.accountId,
+    threadId: params.messageThreadId,
+  });
+  const sender = createPluginActorRef({
+    channel,
+    id: senderId,
+    accountId: params.accountId,
+    dmLane: senderId
+      ? (createPluginLaneRef({
+          channel,
+          to: senderId,
+          accountId: params.accountId,
+        }) ?? null)
+      : undefined,
+  });
 
   const ctx: PluginCommandContext = {
     senderId,
@@ -206,6 +227,8 @@ export async function executePluginCommand(params: {
     from: params.from,
     to: params.to,
     accountId: params.accountId,
+    lane,
+    sender,
     messageThreadId: params.messageThreadId,
     threadParentId: params.threadParentId,
     requestConversationBinding: async (bindingParams) => {

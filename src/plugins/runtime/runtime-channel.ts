@@ -62,6 +62,17 @@ import {
   upsertChannelPairingRequest,
 } from "../../pairing/pairing-store.js";
 import { buildAgentSessionKey, resolveAgentRoute } from "../../routing/resolve-route.js";
+import { defineCachedValue } from "./runtime-cache.js";
+import {
+  resolveActorDmLane,
+  sendPayloadToActorDm,
+  sendPayloadToLane,
+} from "./runtime-channel-outbound.js";
+import { createRuntimeDiscord } from "./runtime-discord.js";
+import { createRuntimeLine } from "./runtime-line.js";
+import { createRuntimeMatrix } from "./runtime-matrix.js";
+import { createRuntimeSignal } from "./runtime-signal.js";
+import { createRuntimeSlack } from "./runtime-slack.js";
 import type { PluginRuntime } from "./types.js";
 
 export function createRuntimeChannel(): PluginRuntime["channel"] {
@@ -149,6 +160,9 @@ export function createRuntimeChannel(): PluginRuntime["channel"] {
     },
     outbound: {
       loadAdapter: loadChannelOutboundAdapter,
+      resolveActorDmLane,
+      sendToLane: sendPayloadToLane,
+      sendToActorDm: sendPayloadToActorDm,
     },
     threadBindings: {
       setIdleTimeoutBySessionKey: ({ channelId, targetSessionKey, accountId, idleTimeoutMs }) =>

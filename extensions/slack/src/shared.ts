@@ -191,6 +191,17 @@ export function createSlackPluginBase(params: {
       threads: true,
       media: true,
       nativeCommands: true,
+      richReplies: {
+        buttons: true,
+        selects: true,
+        commandFallback: true,
+      },
+      interactionResponses: {
+        acknowledge: true,
+        clearInteractive: true,
+        editText: true,
+        followUp: true,
+      },
     },
     commands: {
       nativeCommandsAutoEnabled: false,

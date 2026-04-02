@@ -4,116 +4,15 @@ import { createInteractiveConversationBindingHelpers } from "./interactive-bindi
 import {
   clearPluginInteractiveHandlers,
   dispatchPluginInteractiveHandler,
+  registerPluginInteractionHandler,
   registerPluginInteractiveHandler,
 } from "./interactive.js";
-import type { PluginInteractiveRegistration } from "./types.js";
-
-type TelegramInteractiveHandlerContext = {
-  accountId: string;
-  callbackId: string;
-  conversationId: string;
-  parentConversationId?: string;
-  senderId?: string;
-  senderUsername?: string;
-  threadId?: string | number;
-  isGroup?: boolean;
-  isForum?: boolean;
-  auth?: { isAuthorizedSender?: boolean };
-  callbackMessage: {
-    messageId: number;
-    chatId: string;
-    messageText?: string;
-  };
-  callback: { data: string };
-  channel: string;
-  requestConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  detachConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  getCurrentConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  respond: {
-    reply: (...args: unknown[]) => Promise<void>;
-    editMessage: (...args: unknown[]) => Promise<void>;
-    editButtons: (...args: unknown[]) => Promise<void>;
-    clearButtons: (...args: unknown[]) => Promise<void>;
-    deleteMessage: (...args: unknown[]) => Promise<void>;
-  };
-};
-
-type DiscordInteractiveHandlerContext = {
-  accountId: string;
-  interactionId: string;
-  conversationId: string;
-  parentConversationId?: string;
-  guildId?: string;
-  senderId?: string;
-  senderUsername?: string;
-  auth?: { isAuthorizedSender?: boolean };
-  interaction: {
-    kind: string;
-    messageId?: string;
-    values?: string[];
-    namespace?: string;
-    payload?: string;
-  };
-  channel: string;
-  requestConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  detachConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  getCurrentConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  respond: {
-    acknowledge: (...args: unknown[]) => Promise<void>;
-    reply: (...args: unknown[]) => Promise<void>;
-    followUp: (...args: unknown[]) => Promise<void>;
-    editMessage: (...args: unknown[]) => Promise<void>;
-    clearComponents: (...args: unknown[]) => Promise<void>;
-  };
-};
-
-type SlackInteractiveHandlerContext = {
-  accountId: string;
-  interactionId: string;
-  conversationId: string;
-  parentConversationId?: string;
-  threadId?: string;
-  senderId?: string;
-  senderUsername?: string;
-  auth?: { isAuthorizedSender?: boolean };
-  interaction: {
-    kind: string;
-    actionId?: string;
-    blockId?: string;
-    messageTs?: string;
-    threadTs?: string;
-    value?: string;
-    selectedValues?: string[];
-    selectedLabels?: string[];
-    triggerId?: string;
-    responseUrl?: string;
-    namespace?: string;
-    payload?: string;
-  };
-  channel: string;
-  requestConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  detachConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  getCurrentConversationBinding: (...args: unknown[]) => Promise<unknown>;
-  respond: {
-    acknowledge: (...args: unknown[]) => Promise<void>;
-    reply: (...args: unknown[]) => Promise<void>;
-    followUp: (...args: unknown[]) => Promise<void>;
-    editMessage: (...args: unknown[]) => Promise<void>;
-  };
-};
-
-type TelegramInteractiveHandlerRegistration = PluginInteractiveRegistration<
-  TelegramInteractiveHandlerContext,
-  "telegram"
->;
-type DiscordInteractiveHandlerRegistration = PluginInteractiveRegistration<
-  DiscordInteractiveHandlerContext,
-  "discord"
->;
-type SlackInteractiveHandlerRegistration = PluginInteractiveRegistration<
-  SlackInteractiveHandlerContext,
-  "slack"
->;
+import type {
+  PluginInteractionHandlerContext,
+  PluginInteractiveDiscordHandlerContext,
+  PluginInteractiveSlackHandlerContext,
+  PluginInteractiveTelegramHandlerContext,
+} from "./types.js";
 
 let requestPluginConversationBindingMock: MockInstance<
   typeof conversationBinding.requestPluginConversationBinding
@@ -450,6 +349,16 @@ function registerInteractiveHandler(params: {
   });
 }
 
+function registerInteractionHandler(params: {
+  namespace: string;
+  handler: ReturnType<typeof vi.fn>;
+}) {
+  return registerPluginInteractionHandler("codex-plugin", {
+    namespace: params.namespace,
+    handler: params.handler as never,
+  });
+}
+
 type BindingHelperCase = {
   name: string;
   registerParams: { channel: "telegram" | "discord" | "slack"; namespace: string };
@@ -574,6 +483,69 @@ describe("plugin interactive handlers", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("dispatches generic interaction handlers with lane, sender, and semantic action metadata", async () => {
+    const handler = vi.fn(async (_ctx: PluginInteractionHandlerContext) => ({
+      handled: true,
+    }));
+
+    expect(
+      registerInteractionHandler({
+        namespace: "codex",
+        handler,
+      }),
+    ).toEqual({ ok: true });
+
+    const params = createSlackDispatchParams({
+      data: "codex:approve.thread",
+      interactionId: "interaction-generic-1",
+    });
+
+    const result = await dispatchInteractive(params);
+
+    expect(result).toEqual({ matched: true, handled: true, duplicate: false });
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "slack",
+        interactionId: "interaction-generic-1",
+        lane: expect.objectContaining({
+          channel: "slack",
+          to: "C123",
+          threadId: "1710000000.000100",
+        }),
+        sender: expect.objectContaining({
+          channel: "slack",
+          id: "user-1",
+        }),
+        action: expect.objectContaining({
+          namespace: "codex",
+          payload: "approve.thread",
+          actionId: "approve.thread",
+          kind: "button",
+        }),
+      }),
+    );
+  });
+
+  it("rejects generic and legacy namespace collisions", () => {
+    expect(
+      registerInteractionHandler({
+        namespace: "codex",
+        handler: vi.fn(async () => ({ handled: true })),
+      }),
+    ).toEqual({ ok: true });
+
+    expect(
+      registerInteractiveHandler({
+        channel: "telegram",
+        namespace: "codex",
+        handler: vi.fn(async () => ({ handled: true })),
+      }),
+    ).toEqual({
+      ok: false,
+      error: 'Interactive handler namespace "codex" already registered by plugin "codex-plugin"',
+    });
   });
 
   it.each([
