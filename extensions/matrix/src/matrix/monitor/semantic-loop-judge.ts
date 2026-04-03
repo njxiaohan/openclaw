@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   dispatchReplyFromConfigWithSettledDispatcher,
   type PluginRuntime,
@@ -22,6 +23,13 @@ const DEFAULT_RESULT: MatrixSemanticLoopJudgeResult = {
   confidence: 0,
   reasonCode: "judge_unavailable",
   reasonShort: "Semantic judge unavailable; defaulting to continue.",
+};
+
+const INSUFFICIENT_HISTORY_RESULT: MatrixSemanticLoopJudgeResult = {
+  decision: "continue",
+  confidence: 0,
+  reasonCode: "insufficient_history",
+  reasonShort: "Need at least two turns to judge progress.",
 };
 
 function normalizeConfidence(value: unknown): number {
@@ -168,8 +176,8 @@ export async function runMatrixSemanticLoopJudge(params: {
   roomId: string;
   turns: MatrixSemanticLoopTurn[];
 }): Promise<MatrixSemanticLoopJudgeResult> {
-  if (params.turns.length === 0) {
-    return DEFAULT_RESULT;
+  if (params.turns.length < 2) {
+    return INSUFFICIENT_HISTORY_RESULT;
   }
 
   const prompt = buildSemanticJudgePrompt({
@@ -192,7 +200,7 @@ export async function runMatrixSemanticLoopJudge(params: {
     CommandBody: prompt,
     From: `matrix:system:${params.roomId}`,
     To: `room:${params.roomId}`,
-    SessionKey: `${params.routeSessionKey}:semantic-loop-judge`,
+    SessionKey: `${params.routeSessionKey}:semantic-loop-judge:${randomUUID()}`,
     AccountId: params.accountId,
     ChatType: "channel",
     SenderName: "system",
