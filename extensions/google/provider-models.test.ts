@@ -228,7 +228,7 @@ describe("resolveGoogleGeminiForwardCompatModel", () => {
       ctx: createContext({
         provider: "google",
         modelId: "gemma-4-26b-a4b-it",
-        models: [createTemplateModel("google", "gemini-3-flash-preview", { reasoning: true })],
+        models: [createTemplateModel("google", "gemini-3-flash-preview", { reasoning: false })],
       }),
     });
 
