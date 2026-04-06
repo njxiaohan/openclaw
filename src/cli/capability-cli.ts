@@ -1086,13 +1086,14 @@ async function runMemoryEmbeddingCreate(params: {
 }) {
   ensureMemoryEmbeddingProvidersRegistered();
   const cfg = loadConfig();
-  const requestedProvider = params.provider?.trim() || "auto";
+  const modelRef = resolveModelRefOverride(params.model);
+  const requestedProvider = params.provider?.trim() || modelRef.provider || "auto";
   const result = await createEmbeddingProvider({
     config: cfg,
     agentDir: resolveAgentDir(cfg, resolveDefaultAgentId(cfg)),
     provider: requestedProvider,
     fallback: "none",
-    model: params.model?.trim() || "",
+    model: modelRef.model ?? "",
   });
   if (!result.provider) {
     throw new Error(result.providerUnavailableReason ?? "No embedding provider available.");

@@ -593,6 +593,30 @@ describe("capability cli", () => {
     );
   });
 
+  it("derives the embedding provider from a provider/model override", async () => {
+    await runRegisteredCli({
+      register: registerCapabilityCli as (program: Command) => void,
+      argv: [
+        "capability",
+        "embedding",
+        "create",
+        "--text",
+        "hello",
+        "--model",
+        "openai/text-embedding-3-large",
+        "--json",
+      ],
+    });
+
+    expect(mocks.createEmbeddingProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai",
+        fallback: "none",
+        model: "text-embedding-3-large",
+      }),
+    );
+  });
+
   it("bootstraps built-in embedding providers when the registry is empty", async () => {
     mocks.listMemoryEmbeddingProviders.mockReturnValueOnce([]);
 
