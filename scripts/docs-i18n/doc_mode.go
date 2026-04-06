@@ -243,11 +243,15 @@ func shouldSkipDoc(outputPath string, sourceHash string) (bool, error) {
 	if storedHash == "" {
 		return false, nil
 	}
+	postprocessVersion := extractPostprocessVersion(frontData)
+	if !strings.EqualFold(postprocessVersion, localizedLinkPostprocessVersion) {
+		return false, nil
+	}
 	return strings.EqualFold(storedHash, sourceHash), nil
 }
 
 func extractSourceHash(frontData map[string]any) string {
-	xi, ok := frontData["x-i18n"].(map[string]any)
+	xi, ok := extractXI18N(frontData)
 	if !ok {
 		return ""
 	}
@@ -256,6 +260,26 @@ func extractSourceHash(frontData map[string]any) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func extractPostprocessVersion(frontData map[string]any) string {
+	xi, ok := extractXI18N(frontData)
+	if !ok {
+		return ""
+	}
+	value, ok := xi["postprocess_version"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func extractXI18N(frontData map[string]any) (map[string]any, bool) {
+	xi, ok := frontData["x-i18n"].(map[string]any)
+	if ok {
+		return xi, true
+	}
+	return nil, false
 }
 
 func resolveDocsPath(docsRoot, filePath string) (string, string, error) {

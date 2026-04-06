@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,5 +73,55 @@ func TestRunDocsI18NRewritesFinalLocalizedPageLinks(t *testing.T) {
 		if !containsLine(got, want) {
 			t.Fatalf("expected final localized page link %q in output:\n%s", want, got)
 		}
+	}
+}
+
+func TestRunDocsI18NOnlyBecomesSkippableAfterPostprocessSucceeds(t *testing.T) {
+	t.Parallel()
+
+	docsRoot := t.TempDir()
+	writeFile(t, filepath.Join(docsRoot, ".i18n", "glossary.zh-CN.json"), "[]")
+	writeFile(t, filepath.Join(docsRoot, "docs.json"), `{"redirects":[]}`)
+	sourcePath := filepath.Join(docsRoot, "gateway", "index.md")
+	writeFile(t, sourcePath, stringsJoin(
+		"---",
+		"title: Gateway",
+		"---",
+		"",
+		"See [Troubleshooting](/gateway/troubleshooting).",
+	))
+	writeFile(t, filepath.Join(docsRoot, "gateway", "troubleshooting.md"), "# Troubleshooting\n")
+	outputPath := filepath.Join(docsRoot, "zh-CN", "gateway", "index.md")
+
+	skip, outputPath, err := processFileDoc(context.Background(), fakeDocsTranslator{}, docsRoot, sourcePath, "en", "zh-CN", true)
+	if err != nil {
+		t.Fatalf("processFileDoc failed: %v", err)
+	}
+	if skip {
+		t.Fatal("processFileDoc unexpectedly skipped translation")
+	}
+
+	sourceBytes, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source failed: %v", err)
+	}
+	canSkip, err := shouldSkipDoc(outputPath, hashBytes(sourceBytes))
+	if err != nil {
+		t.Fatalf("shouldSkipDoc before postprocess failed: %v", err)
+	}
+	if canSkip {
+		t.Fatal("expected pending postprocess output to remain non-skippable")
+	}
+
+	if err := postprocessLocalizedDocs(docsRoot, "zh-CN", []string{outputPath}); err != nil {
+		t.Fatalf("postprocessLocalizedDocs failed: %v", err)
+	}
+
+	canSkip, err = shouldSkipDoc(outputPath, hashBytes(sourceBytes))
+	if err != nil {
+		t.Fatalf("shouldSkipDoc after postprocess failed: %v", err)
+	}
+	if !canSkip {
+		t.Fatalf("expected postprocessed output to become skippable:\n%s", mustReadFile(t, outputPath))
 	}
 }
