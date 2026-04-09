@@ -47,6 +47,9 @@ Live-verified:
   `CODEX-EXT-GPT52-OK`.
 - Provider/model metadata in agent results reported provider `codex` and bare
   Codex model ids (`gpt-5.4`, `gpt-5.2`).
+- Docker live Codex-harness smoke: gateway `agent` request through bundled
+  plugin `codex`, app-server-backed `codex/gpt-5.4`, then a second request in
+  the same session.
 
 Targeted-verified:
 
@@ -496,6 +499,7 @@ Remaining useful targeted tests:
   - [x] same Codex thread switching `gpt-5.4` to `gpt-5.2`
   - [x] live `codex/gpt-5.4` provider ref through plugin-loaded gateway after
         the bundled plugin move
+  - [x] Docker live gateway smoke for the plugin-owned Codex harness
   - [ ] tool turn
   - [ ] image input
   - [x] TTS/image/video/music tool media output bridge coverage
