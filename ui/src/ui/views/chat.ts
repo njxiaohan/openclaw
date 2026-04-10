@@ -1,10 +1,6 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
-import type {
-  CompactionStatus as CompactionIndicatorStatus,
-  FallbackStatus as FallbackIndicatorStatus,
-} from "../app-tool-stream.ts";
 import {
   CHAT_ATTACHMENT_ACCEPT,
   isSupportedChatAttachmentMimeType,
@@ -17,7 +13,12 @@ import {
   renderStreamingGroup,
 } from "../chat/grouped-render.ts";
 import { InputHistory } from "../chat/input-history.ts";
-import { normalizeMessage, normalizeRoleForGrouping } from "../chat/message-normalizer.ts";
+import { extractTextCached } from "../chat/message-extract.ts";
+import {
+  isToolResultMessage,
+  normalizeMessage,
+  normalizeRoleForGrouping,
+} from "../chat/message-normalizer.ts";
 import { PinnedMessages } from "../chat/pinned-messages.ts";
 import { getPinnedMessageSummary } from "../chat/pinned-summary.ts";
 import { messageMatchesSearchQuery } from "../chat/search-match.ts";
@@ -30,15 +31,32 @@ import {
   type SlashCommandDef,
 } from "../chat/slash-commands.ts";
 import { isSttSupported, startStt, stopStt } from "../chat/speech.ts";
+import { buildSidebarContent, extractToolCards, extractToolPreview } from "../chat/tool-cards.ts";
 import { icons } from "../icons.ts";
-import { normalizeLowercaseStringOrEmpty } from "../string-coerce.ts";
+import type { SidebarContent } from "../sidebar-content.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../types.ts";
-import type { ChatItem, MessageGroup } from "../types/chat-types.ts";
+import type { ChatItem, MessageGroup, ToolCard } from "../types/chat-types.ts";
 import type { ChatAttachment, ChatQueueItem } from "../ui-types.ts";
 import { agentLogoUrl, resolveAgentAvatarUrl } from "./agents-utils.ts";
 import { renderMarkdownSidebar } from "./markdown-sidebar.ts";
 import "../components/resizable-divider.ts";
+
+export type CompactionIndicatorStatus = {
+  active: boolean;
+  startedAt: number | null;
+  completedAt: number | null;
+};
+
+export type FallbackIndicatorStatus = {
+  phase?: "active" | "cleared";
+  selected: string;
+  active: string;
+  previous?: string;
+  reason?: string;
+  attempts: string[];
+  occurredAt: number;
+};
 
 export type ChatProps = {
   sessionKey: string;
@@ -66,11 +84,14 @@ export type ChatProps = {
   sessions: SessionsListResult | null;
   focusMode: boolean;
   sidebarOpen?: boolean;
-  sidebarContent?: string | null;
+  sidebarContent?: SidebarContent | null;
   sidebarError?: string | null;
   splitRatio?: number;
+  canvasHostUrl?: string | null;
   assistantName: string;
   assistantAvatar: string | null;
+  localMediaPreviewRoots?: string[];
+  autoExpandToolCalls?: boolean;
   attachments?: ChatAttachment[];
   onAttachmentsChange?: (attachments: ChatAttachment[]) => void;
   showNewMessages?: boolean;
@@ -93,7 +114,7 @@ export type ChatProps = {
   onAgentChange: (agentId: string) => void;
   onNavigateToAgent?: () => void;
   onSessionSelect?: (sessionKey: string) => void;
-  onOpenSidebar?: (content: string) => void;
+  onOpenSidebar?: (content: SidebarContent) => void;
   onCloseSidebar?: () => void;
   onSplitRatioChange?: (ratio: number) => void;
   onChatScroll?: (event: Event) => void;
@@ -107,6 +128,9 @@ const FALLBACK_TOAST_DURATION_MS = 8000;
 const inputHistories = new Map<string, InputHistory>();
 const pinnedMessagesMap = new Map<string, PinnedMessages>();
 const deletedMessagesMap = new Map<string, DeletedMessages>();
+const expandedToolCardsBySession = new Map<string, Map<string, boolean>>();
+const initializedToolCardsBySession = new Map<string, Set<string>>();
+const lastAutoExpandPrefBySession = new Map<string, boolean>();
 
 function getInputHistory(sessionKey: string): InputHistory {
   return getOrCreateSessionCacheValue(inputHistories, sessionKey, () => new InputHistory());
@@ -126,6 +150,87 @@ function getDeletedMessages(sessionKey: string): DeletedMessages {
     sessionKey,
     () => new DeletedMessages(sessionKey),
   );
+}
+
+function getExpandedToolCards(sessionKey: string): Map<string, boolean> {
+  return getOrCreateSessionCacheValue(expandedToolCardsBySession, sessionKey, () => new Map());
+}
+
+function getInitializedToolCards(sessionKey: string): Set<string> {
+  return getOrCreateSessionCacheValue(initializedToolCardsBySession, sessionKey, () => new Set());
+}
+
+function appendCanvasBlockToAssistantMessage(
+  message: unknown,
+  preview: Extract<NonNullable<ToolCard["preview"]>, { kind: "canvas" }>,
+  rawText: string | null,
+) {
+  const raw = message as Record<string, unknown>;
+  const existingContent = Array.isArray(raw.content)
+    ? [...raw.content]
+    : typeof raw.content === "string"
+      ? [{ type: "text", text: raw.content }]
+      : typeof raw.text === "string"
+        ? [{ type: "text", text: raw.text }]
+        : [];
+  const alreadyHasArtifact = existingContent.some((block) => {
+    if (!block || typeof block !== "object") {
+      return false;
+    }
+    const typed = block as {
+      type?: unknown;
+      preview?: { kind?: unknown; viewId?: unknown; url?: unknown };
+    };
+    return (
+      typed.type === "canvas" &&
+      typed.preview?.kind === "canvas" &&
+      ((preview.viewId && typed.preview.viewId === preview.viewId) ||
+        (preview.url && typed.preview.url === preview.url))
+    );
+  });
+  if (alreadyHasArtifact) {
+    return message;
+  }
+  return {
+    ...raw,
+    content: [
+      ...existingContent,
+      {
+        type: "canvas",
+        preview,
+        ...(rawText ? { rawText } : {}),
+      },
+    ],
+  };
+}
+
+function extractChatMessagePreview(toolMessage: unknown): {
+  preview: Extract<NonNullable<ToolCard["preview"]>, { kind: "canvas" }>;
+  text: string | null;
+} | null {
+  const cards = extractToolCards(toolMessage, "preview");
+  for (let index = cards.length - 1; index >= 0; index--) {
+    const card = cards[index];
+    if (card?.preview?.kind === "canvas") {
+      return {
+        preview: card.preview,
+        text: card.outputText ?? null,
+      };
+    }
+  }
+  const text = extractTextCached(toolMessage) ?? undefined;
+  const toolRecord = toolMessage as Record<string, unknown>;
+  const toolName =
+    typeof toolRecord.toolName === "string"
+      ? toolRecord.toolName
+      : typeof toolRecord.tool_name === "string"
+        ? toolRecord.tool_name
+        : undefined;
+  const preview = extractToolPreview(text, toolName);
+  if (preview?.kind !== "canvas") {
+    return null;
+  }
+  return { preview, text: text ?? null };
 }
 
 interface ChatEphemeralState {
@@ -178,11 +283,65 @@ function adjustTextareaHeight(el: HTMLTextAreaElement) {
   el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
 }
 
+function syncToolCardExpansionState(
+  sessionKey: string,
+  items: Array<ChatItem | MessageGroup>,
+  autoExpandToolCalls: boolean,
+) {
+  const expanded = getExpandedToolCards(sessionKey);
+  const initialized = getInitializedToolCards(sessionKey);
+  const previousAutoExpand = lastAutoExpandPrefBySession.get(sessionKey) ?? false;
+  const currentToolCardIds = new Set<string>();
+  for (const item of items) {
+    if (item.kind !== "group") {
+      continue;
+    }
+    for (const entry of item.messages) {
+      const cards = extractToolCards(entry.message, entry.key);
+      for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+        const disclosureId = `${entry.key}:toolcard:${cardIndex}`;
+        currentToolCardIds.add(disclosureId);
+        if (initialized.has(disclosureId)) {
+          continue;
+        }
+        expanded.set(disclosureId, autoExpandToolCalls);
+        initialized.add(disclosureId);
+      }
+      const messageRecord = entry.message as Record<string, unknown>;
+      const role = typeof messageRecord.role === "string" ? messageRecord.role : "unknown";
+      const normalizedRole = normalizeRoleForGrouping(role);
+      const isToolMessage =
+        isToolResultMessage(entry.message) ||
+        normalizedRole === "tool" ||
+        role.toLowerCase() === "toolresult" ||
+        role.toLowerCase() === "tool_result" ||
+        typeof messageRecord.toolCallId === "string" ||
+        typeof messageRecord.tool_call_id === "string";
+      if (!isToolMessage) {
+        continue;
+      }
+      const disclosureId = `toolmsg:${entry.key}`;
+      currentToolCardIds.add(disclosureId);
+      if (initialized.has(disclosureId)) {
+        continue;
+      }
+      expanded.set(disclosureId, autoExpandToolCalls);
+      initialized.add(disclosureId);
+    }
+  }
+  if (autoExpandToolCalls && !previousAutoExpand) {
+    for (const toolCardId of currentToolCardIds) {
+      expanded.set(toolCardId, true);
+    }
+  }
+  lastAutoExpandPrefBySession.set(sessionKey, autoExpandToolCalls);
+}
+
 function renderCompactionIndicator(status: CompactionIndicatorStatus | null | undefined) {
   if (!status) {
     return nothing;
   }
-  if (status.phase === "active") {
+  if (status.active) {
     return html`
       <div
         class="compaction-indicator compaction-indicator--active"
@@ -193,18 +352,7 @@ function renderCompactionIndicator(status: CompactionIndicatorStatus | null | un
       </div>
     `;
   }
-  if (status.phase === "retrying") {
-    return html`
-      <div
-        class="compaction-indicator compaction-indicator--active"
-        role="status"
-        aria-live="polite"
-      >
-        ${icons.loader} Retrying after compaction...
-      </div>
-    `;
-  }
-  if (status.phase === "complete" && status.completedAt) {
+  if (status.completedAt) {
     const elapsed = Date.now() - status.completedAt;
     if (elapsed < COMPACTION_TOAST_DURATION_MS) {
       return html`
@@ -324,8 +472,8 @@ function renderContextNotice(
     <div class="context-notice" role="status" style="--ctx-color:${color};--ctx-bg:${bg}">
       <svg
         class="context-notice__icon"
-        width="16"
-        height="16"
+        width="24"
+        height="24"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
@@ -496,12 +644,12 @@ function updateSlashMenu(value: string, requestUpdate: () => void): void {
   // Arg mode: /command <partial-arg>
   const argMatch = value.match(/^\/(\S+)\s(.*)$/);
   if (argMatch) {
-    const cmdName = normalizeLowercaseStringOrEmpty(argMatch[1]);
-    const argFilter = normalizeLowercaseStringOrEmpty(argMatch[2]);
+    const cmdName = argMatch[1].toLowerCase();
+    const argFilter = argMatch[2].toLowerCase();
     const cmd = SLASH_COMMANDS.find((c) => c.name === cmdName);
     if (cmd?.argOptions?.length) {
       const filtered = argFilter
-        ? cmd.argOptions.filter((opt) => normalizeLowercaseStringOrEmpty(opt).startsWith(argFilter))
+        ? cmd.argOptions.filter((opt) => opt.toLowerCase().startsWith(argFilter))
         : cmd.argOptions;
       if (filtered.length > 0) {
         vs.slashMenuMode = "args";
@@ -884,7 +1032,7 @@ function renderSlashMenu(
 
 export function renderChat(props: ChatProps) {
   const canCompose = props.connected;
-  const isBusy = props.sending || props.stream !== null || props.canAbort;
+  const isBusy = props.sending || props.stream !== null;
   const canAbort = Boolean(props.canAbort && props.onAbort);
   const activeSession = props.sessions?.sessions?.find((row) => row.key === props.sessionKey);
   const reasoningLevel = activeSession?.reasoningLevel ?? "off";
@@ -933,6 +1081,12 @@ export function renderChat(props: ChatProps) {
   };
 
   const chatItems = buildChatItems(props);
+  syncToolCardExpansionState(props.sessionKey, chatItems, Boolean(props.autoExpandToolCalls));
+  const expandedToolCards = getExpandedToolCards(props.sessionKey);
+  const toggleToolCardExpanded = (toolCardId: string) => {
+    expandedToolCards.set(toolCardId, !expandedToolCards.get(toolCardId));
+    requestUpdate();
+  };
   const isEmpty = chatItems.length === 0 && !props.loading;
 
   const thread = html`
@@ -1020,9 +1174,21 @@ export function renderChat(props: ChatProps) {
                 onOpenSidebar: props.onOpenSidebar,
                 showReasoning,
                 showToolCalls: props.showToolCalls,
+                autoExpandToolCalls: Boolean(props.autoExpandToolCalls),
+                isToolMessageExpanded: (messageId: string) =>
+                  expandedToolCards.get(messageId) ?? false,
+                onToggleToolMessageExpanded: (messageId: string) => {
+                  expandedToolCards.set(messageId, !expandedToolCards.get(messageId));
+                  requestUpdate();
+                },
+                isToolExpanded: (toolCardId: string) => expandedToolCards.get(toolCardId) ?? false,
+                onToggleToolExpanded: toggleToolCardExpanded,
+                onRequestUpdate: requestUpdate,
                 assistantName: props.assistantName,
                 assistantAvatar: assistantIdentity.avatar,
                 basePath: props.basePath,
+                localMediaPreviewRoots: props.localMediaPreviewRoots ?? [],
+                canvasHostUrl: props.canvasHostUrl,
                 contextWindow:
                   activeSession?.contextTokens ?? props.sessions?.defaults?.contextTokens ?? null,
                 onDelete: () => {
@@ -1197,12 +1363,23 @@ export function renderChat(props: ChatProps) {
                 ${renderMarkdownSidebar({
                   content: props.sidebarContent ?? null,
                   error: props.sidebarError ?? null,
+                  canvasHostUrl: props.canvasHostUrl,
                   onClose: props.onCloseSidebar!,
                   onViewRawText: () => {
                     if (!props.sidebarContent || !props.onOpenSidebar) {
                       return;
                     }
-                    props.onOpenSidebar(`\`\`\`\n${props.sidebarContent}\n\`\`\``);
+                    if (props.sidebarContent.kind === "markdown") {
+                      props.onOpenSidebar(
+                        buildSidebarContent(`\`\`\`\n${props.sidebarContent.content}\n\`\`\``),
+                      );
+                      return;
+                    }
+                    if (props.sidebarContent.rawText?.trim()) {
+                      props.onOpenSidebar(
+                        buildSidebarContent(`\`\`\`json\n${props.sidebarContent.rawText}\n\`\`\``),
+                      );
+                    }
                   },
                 })}
               </div>
@@ -1422,14 +1599,13 @@ function groupMessages(items: ChatItem[]): Array<ChatItem | MessageGroup> {
 
     const normalized = normalizeMessage(item.message);
     const role = normalizeRoleForGrouping(normalized.role);
-    const senderLabel =
-      normalizeLowercaseStringOrEmpty(role) === "user" ? (normalized.senderLabel ?? null) : null;
+    const senderLabel = role.toLowerCase() === "user" ? (normalized.senderLabel ?? null) : null;
     const timestamp = normalized.timestamp || Date.now();
 
     if (
       !currentGroup ||
       currentGroup.role !== role ||
-      (normalizeLowercaseStringOrEmpty(role) === "user" && currentGroup.senderLabel !== senderLabel)
+      (role.toLowerCase() === "user" && currentGroup.senderLabel !== senderLabel)
     ) {
       if (currentGroup) {
         result.push(currentGroup);
@@ -1488,7 +1664,7 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
       continue;
     }
 
-    if (!props.showToolCalls && normalizeLowercaseStringOrEmpty(normalized.role) === "toolresult") {
+    if (!props.showToolCalls && normalized.role.toLowerCase() === "toolresult") {
       continue;
     }
 
@@ -1502,6 +1678,33 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
       key: messageKey(msg, i),
       message: msg,
     });
+  }
+  const liftedCanvasSource = [...tools]
+    .toReversed()
+    .map((tool) => extractChatMessagePreview(tool))
+    .filter((entry) => Boolean(entry))
+    .find((entry) => Boolean(entry));
+  if (liftedCanvasSource) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item?.kind !== "message") {
+        continue;
+      }
+      const message = item.message as Record<string, unknown>;
+      const role = typeof message.role === "string" ? message.role.toLowerCase() : "";
+      if (role !== "assistant") {
+        continue;
+      }
+      items[i] = {
+        ...item,
+        message: appendCanvasBlockToAssistantMessage(
+          message,
+          liftedCanvasSource.preview,
+          liftedCanvasSource.text,
+        ),
+      };
+      break;
+    }
   }
   // Interleave stream segments and tool cards in order. Each segment
   // contains text that was streaming before the corresponding tool started.
@@ -1547,7 +1750,20 @@ function messageKey(message: unknown, index: number): string {
   const m = message as Record<string, unknown>;
   const toolCallId = typeof m.toolCallId === "string" ? m.toolCallId : "";
   if (toolCallId) {
-    return `tool:${toolCallId}`;
+    const role = typeof m.role === "string" ? m.role : "unknown";
+    const id = typeof m.id === "string" ? m.id : "";
+    if (id) {
+      return `tool:${role}:${toolCallId}:${id}`;
+    }
+    const messageId = typeof m.messageId === "string" ? m.messageId : "";
+    if (messageId) {
+      return `tool:${role}:${toolCallId}:${messageId}`;
+    }
+    const timestamp = typeof m.timestamp === "number" ? m.timestamp : null;
+    if (timestamp != null) {
+      return `tool:${role}:${toolCallId}:${timestamp}:${index}`;
+    }
+    return `tool:${role}:${toolCallId}:${index}`;
   }
   const id = typeof m.id === "string" ? m.id : "";
   if (id) {

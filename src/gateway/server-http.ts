@@ -16,7 +16,6 @@ import { loadConfig } from "../config/config.js";
 import type { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveHookExternalContentSource as resolveHookExternalContentSourceFromSession } from "../security/external-content.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
-import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import {
   AUTH_RATE_LIMIT_SCOPE_HOOK_AUTH,
   createAuthRateLimiter,
@@ -31,6 +30,7 @@ import {
 } from "./auth.js";
 import { normalizeCanvasScopedUrl } from "./canvas-capability.js";
 import {
+  handleControlUiAssistantMediaRequest,
   handleControlUiAvatarRequest,
   handleControlUiHttpRequest,
   type ControlUiRootState,
@@ -41,11 +41,9 @@ import {
   extractHookToken,
   getHookAgentPolicyError,
   getHookChannelError,
-  getHookSessionKeyPrefixError,
   type HookAgentDispatchPayload,
   type HooksConfigResolved,
   isHookAgentAllowed,
-  isSessionKeyAllowedByPrefix,
   normalizeAgentPayload,
   normalizeHookHeaders,
   resolveHookIdempotencyKey,
@@ -98,7 +96,8 @@ function resolveMappedHookExternalContentSource(params: {
   payload: Record<string, unknown>;
   sessionKey: string;
 }) {
-  const payloadSource = normalizeLowercaseStringOrEmpty(params.payload.source);
+  const payloadSource =
+    typeof params.payload.source === "string" ? params.payload.source.trim().toLowerCase() : "";
   if (params.subPath === "gmail" || payloadSource === "gmail") {
     return "gmail" as const;
   }
@@ -134,6 +133,7 @@ const GATEWAY_PROBE_STATUS_BY_PATH = new Map<string, "live" | "ready">([
   ["/ready", "ready"],
   ["/readyz", "ready"],
 ]);
+
 function resolvePluginGatewayAuthBypassPaths(
   configSnapshot: ReturnType<typeof loadConfig>,
 ): Set<string> {
@@ -177,7 +177,6 @@ async function canRevealReadinessDetails(params: {
     req: params.req,
     trustedProxies: params.trustedProxies,
     allowRealIpFallback: params.allowRealIpFallback,
-    browserOriginPolicy: resolveHttpBrowserOriginPolicy(params.req),
   });
   return authResult.ok;
 }
@@ -265,20 +264,6 @@ function writeUpgradeAuthFailure(
   socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
 }
 
-function writeUpgradeServiceUnavailable(
-  socket: { write: (chunk: string) => void },
-  responseBody: string,
-) {
-  socket.write(
-    "HTTP/1.1 503 Service Unavailable\r\n" +
-      "Connection: close\r\n" +
-      "Content-Type: text/plain; charset=utf-8\r\n" +
-      `Content-Length: ${Buffer.byteLength(responseBody, "utf8")}\r\n` +
-      "\r\n" +
-      responseBody,
-  );
-}
-
 export type HooksRequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 
 type GatewayHttpRequestStage = {
@@ -286,20 +271,12 @@ type GatewayHttpRequestStage = {
   run: () => Promise<boolean> | boolean;
 };
 
-export async function runGatewayHttpRequestStages(
+async function runGatewayHttpRequestStages(
   stages: readonly GatewayHttpRequestStage[],
 ): Promise<boolean> {
   for (const stage of stages) {
-    try {
-      if (await stage.run()) {
-        return true;
-      }
-    } catch (err) {
-      // Log and skip the failing stage so subsequent stages (control-ui,
-      // gateway-probes, etc.) remain reachable.  A common trigger is a
-      // plugin-owned route/runtime code can still fail to load when an
-      // optional dependency is missing. Keep later stages reachable.
-      console.error(`[gateway-http] stage "${stage.name}" threw — skipping:`, err);
+    if (await stage.run()) {
+      return true;
     }
   }
   return false;
@@ -346,6 +323,7 @@ function buildPluginRequestStages(params: {
           trustedProxies: params.trustedProxies,
           allowRealIpFallback: params.allowRealIpFallback,
           rateLimiter: params.rateLimiter,
+          browserOriginPolicy: resolveHttpBrowserOriginPolicy(params.req),
         });
         if (!requestAuth) {
           return true;
@@ -603,14 +581,6 @@ export function createHooksRequestHandler(
         sessionKey: sessionKey.value,
         targetAgentId,
       });
-      const allowedPrefixes = hooksConfig.sessionPolicy.allowedSessionKeyPrefixes;
-      if (
-        allowedPrefixes &&
-        !isSessionKeyAllowedByPrefix(normalizedDispatchSessionKey, allowedPrefixes)
-      ) {
-        sendJson(res, 400, { ok: false, error: getHookSessionKeyPrefixError(allowedPrefixes) });
-        return true;
-      }
       const runId = dispatchAgentHook({
         ...normalized.value,
         idempotencyKey,
@@ -672,14 +642,6 @@ export function createHooksRequestHandler(
             sessionKey: sessionKey.value,
             targetAgentId,
           });
-          const allowedPrefixes = hooksConfig.sessionPolicy.allowedSessionKeyPrefixes;
-          if (
-            allowedPrefixes &&
-            !isSessionKeyAllowedByPrefix(normalizedDispatchSessionKey, allowedPrefixes)
-          ) {
-            sendJson(res, 400, { ok: false, error: getHookSessionKeyPrefixError(allowedPrefixes) });
-            return true;
-          }
           const replayKey = buildHookReplayCacheKey({
             pathKey: subPath || "mapping",
             token,
@@ -795,7 +757,7 @@ export function createGatewayHttpServer(opts: {
     });
 
     // Don't interfere with WebSocket upgrades; ws handles the 'upgrade' event.
-    if (normalizeLowercaseStringOrEmpty(req.headers.upgrade) === "websocket") {
+    if (String(req.headers.upgrade ?? "").toLowerCase() === "websocket") {
       return;
     }
 
@@ -956,12 +918,18 @@ export function createGatewayHttpServer(opts: {
 
       if (controlUiEnabled) {
         requestStages.push({
+          name: "control-ui-assistant-media",
+          run: () =>
+            handleControlUiAssistantMediaRequest(req, res, {
+              basePath: controlUiBasePath,
+            }),
+        });
+        requestStages.push({
           name: "control-ui-avatar",
           run: () =>
             handleControlUiAvatarRequest(req, res, {
               basePath: controlUiBasePath,
-              resolveAvatar: (agentId) =>
-                resolveAgentAvatar(configSnapshot, agentId, { includeUiOverride: true }),
+              resolveAvatar: (agentId) => resolveAgentAvatar(configSnapshot, agentId),
             }),
         });
         requestStages.push({
@@ -996,8 +964,7 @@ export function createGatewayHttpServer(opts: {
       res.statusCode = 404;
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.end("Not Found");
-    } catch (err) {
-      console.error("[gateway-http] unhandled error in request handler:", err);
+    } catch {
       res.statusCode = 500;
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.end("Internal Server Error");
@@ -1064,15 +1031,29 @@ export function attachGatewayUpgradeHandler(opts: {
         }
       }
       const preauthBudgetKey = resolveRequestClientIp(req, trustedProxies, allowRealIpFallback);
-      // Keep startup upgrades inside the pre-auth budget until WS handlers attach.
-      if (!preauthConnectionBudget.acquire(preauthBudgetKey)) {
-        writeUpgradeServiceUnavailable(socket, "Too many unauthenticated sockets");
+      if (wss.listenerCount("connection") === 0) {
+        const responseBody = "Gateway websocket handlers unavailable";
+        socket.write(
+          "HTTP/1.1 503 Service Unavailable\r\n" +
+            "Connection: close\r\n" +
+            "Content-Type: text/plain; charset=utf-8\r\n" +
+            `Content-Length: ${Buffer.byteLength(responseBody, "utf8")}\r\n` +
+            "\r\n" +
+            responseBody,
+        );
         socket.destroy();
         return;
       }
-      if (wss.listenerCount("connection") === 0) {
-        preauthConnectionBudget.release(preauthBudgetKey);
-        writeUpgradeServiceUnavailable(socket, "Gateway websocket handlers unavailable");
+      if (!preauthConnectionBudget.acquire(preauthBudgetKey)) {
+        const responseBody = "Too many unauthenticated sockets";
+        socket.write(
+          "HTTP/1.1 503 Service Unavailable\r\n" +
+            "Connection: close\r\n" +
+            "Content-Type: text/plain; charset=utf-8\r\n" +
+            `Content-Length: ${Buffer.byteLength(responseBody, "utf8")}\r\n` +
+            "\r\n" +
+            responseBody,
+        );
         socket.destroy();
         return;
       }

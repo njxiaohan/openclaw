@@ -5,7 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CONTROL_UI_BOOTSTRAP_CONFIG_PATH } from "./control-ui-contract.js";
-import { handleControlUiAvatarRequest, handleControlUiHttpRequest } from "./control-ui.js";
+import {
+  handleControlUiAssistantMediaRequest,
+  handleControlUiAvatarRequest,
+  handleControlUiHttpRequest,
+} from "./control-ui.js";
 import { makeMockHttpResponse } from "./test-http-response.js";
 
 describe("handleControlUiHttpRequest", () => {
@@ -27,6 +31,8 @@ describe("handleControlUiHttpRequest", () => {
       basePath: string;
       assistantName: string;
       assistantAvatar: string;
+      assistantAgentId: string;
+      localMediaPreviewRoots?: string[];
     };
   }
 
@@ -73,6 +79,20 @@ describe("handleControlUiHttpRequest", () => {
         ...(params.basePath ? { basePath: params.basePath } : {}),
         resolveAvatar: params.resolveAvatar,
       },
+    );
+    return { res, end, handled };
+  }
+
+  async function runAssistantMediaRequest(params: {
+    url: string;
+    method: "GET" | "HEAD";
+    basePath?: string;
+  }) {
+    const { res, end } = makeMockHttpResponse();
+    const handled = await handleControlUiAssistantMediaRequest(
+      { url: params.url, method: params.method } as IncomingMessage,
+      res,
+      params.basePath ? { basePath: params.basePath } : {},
     );
     return { res, end, handled };
   }
@@ -128,6 +148,70 @@ describe("handleControlUiHttpRequest", () => {
         expect(String(csp)).toContain("script-src 'self'");
         expect(String(csp)).not.toContain("script-src 'self' 'unsafe-inline'");
       },
+    });
+  });
+
+  it("serves assistant local media through the control ui media route", async () => {
+    const tmpRoot = path.join("/tmp/openclaw", `ui-media-${Date.now()}`);
+    try {
+      await fs.mkdir(tmpRoot, { recursive: true });
+      const filePath = path.join(tmpRoot, "photo.png");
+      await fs.writeFile(filePath, Buffer.from("not-a-real-png"));
+      const { res, handled } = await runAssistantMediaRequest({
+        url: `/__openclaw__/assistant-media?source=${encodeURIComponent(filePath)}`,
+        method: "GET",
+      });
+      expect(handled).toBe(true);
+      expect(res.statusCode).toBe(200);
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects assistant local media outside allowed preview roots", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-media-blocked-"));
+    try {
+      const filePath = path.join(tmp, "photo.png");
+      await fs.writeFile(filePath, Buffer.from("not-a-real-png"));
+      const { res, handled, end } = await runAssistantMediaRequest({
+        url: `/__openclaw__/assistant-media?source=${encodeURIComponent(filePath)}`,
+        method: "GET",
+      });
+      expectNotFoundResponse({ handled, res, end });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("reports assistant local media availability metadata", async () => {
+    const tmpRoot = path.join("/tmp/openclaw", `ui-media-meta-${Date.now()}`);
+    try {
+      await fs.mkdir(tmpRoot, { recursive: true });
+      const filePath = path.join(tmpRoot, "photo.png");
+      await fs.writeFile(filePath, Buffer.from("not-a-real-png"));
+      const { res, handled, end } = await runAssistantMediaRequest({
+        url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+        method: "GET",
+      });
+      expect(handled).toBe(true);
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(String(end.mock.calls[0]?.[0] ?? ""))).toEqual({ available: true });
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports assistant local media availability failures with a reason", async () => {
+    const { res, handled, end } = await runAssistantMediaRequest({
+      url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent("/Users/test/Documents/private.pdf")}`,
+      method: "GET",
+    });
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(String(end.mock.calls[0]?.[0] ?? ""))).toEqual({
+      available: false,
+      code: "outside-allowed-folders",
+      reason: "Outside allowed folders",
     });
   });
 
@@ -195,8 +279,8 @@ describe("handleControlUiHttpRequest", () => {
         expect(parsed.basePath).toBe("");
         expect(parsed.assistantName).toBe("</script><script>alert(1)//");
         expect(parsed.assistantAvatar).toBe("/avatar/main");
-        expect(parsed).not.toHaveProperty("assistantAgentId");
-        expect(parsed).not.toHaveProperty("serverVersion");
+        expect(parsed.assistantAgentId).toBe("main");
+        expect(Array.isArray(parsed.localMediaPreviewRoots)).toBe(true);
       },
     });
   });
@@ -222,8 +306,8 @@ describe("handleControlUiHttpRequest", () => {
         expect(parsed.basePath).toBe("/openclaw");
         expect(parsed.assistantName).toBe("Ops");
         expect(parsed.assistantAvatar).toBe("/openclaw/avatar/main");
-        expect(parsed).not.toHaveProperty("assistantAgentId");
-        expect(parsed).not.toHaveProperty("serverVersion");
+        expect(parsed.assistantAgentId).toBe("main");
+        expect(Array.isArray(parsed.localMediaPreviewRoots)).toBe(true);
       },
     });
   });

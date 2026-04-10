@@ -12,7 +12,6 @@ import {
 } from "../../../src/gateway/protocol/connect-error-details.js";
 import { clearDeviceAuthToken, loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth.ts";
 import { loadOrCreateDeviceIdentity, signDevicePayload } from "./device-identity.ts";
-import { normalizeLowercaseStringOrEmpty, normalizeOptionalString } from "./string-coerce.ts";
 import { generateUUID } from "./uuid.ts";
 
 export type GatewayEventFrame = {
@@ -83,7 +82,7 @@ export function isNonRecoverableAuthError(error: GatewayErrorInfo | undefined): 
 function isTrustedRetryEndpoint(url: string): boolean {
   try {
     const gatewayUrl = new URL(url, window.location.href);
-    const host = normalizeLowercaseStringOrEmpty(gatewayUrl.hostname);
+    const host = gatewayUrl.hostname.trim().toLowerCase();
     const isLoopbackHost =
       host === "localhost" || host === "::1" || host === "[::1]" || host === "127.0.0.1";
     const isLoopbackIPv4 = host.startsWith("127.");
@@ -112,6 +111,7 @@ export type GatewayHelloOk = {
     scopes?: string[];
     issuedAtMs?: number;
   };
+  canvasHostUrl?: string;
   policy?: { tickIntervalMs?: number };
 };
 
@@ -295,10 +295,6 @@ export class GatewayBrowserClient {
 
   stop() {
     this.closed = true;
-    if (this.connectTimer !== null) {
-      window.clearTimeout(this.connectTimer);
-      this.connectTimer = null;
-    }
     this.ws?.close();
     this.ws = null;
     this.pendingConnectError = undefined;
@@ -387,8 +383,8 @@ export class GatewayBrowserClient {
     const role = CONTROL_UI_OPERATOR_ROLE;
     const scopes = [...CONTROL_UI_OPERATOR_SCOPES];
     const client = this.buildConnectClient();
-    const explicitGatewayToken = normalizeOptionalString(this.opts.token);
-    const explicitPassword = normalizeOptionalString(this.opts.password);
+    const explicitGatewayToken = this.opts.token?.trim() || undefined;
+    const explicitPassword = this.opts.password?.trim() || undefined;
 
     // crypto.subtle is only available in secure contexts (HTTPS, localhost).
     // Over plain HTTP, we skip device identity and fall back to token-only auth.
@@ -565,8 +561,8 @@ export class GatewayBrowserClient {
   }
 
   private selectConnectAuth(params: { role: string; deviceId: string }): SelectedConnectAuth {
-    const explicitGatewayToken = normalizeOptionalString(this.opts.token);
-    const authPassword = normalizeOptionalString(this.opts.password);
+    const explicitGatewayToken = this.opts.token?.trim() || undefined;
+    const authPassword = this.opts.password?.trim() || undefined;
     const storedEntry = loadDeviceAuthToken({
       deviceId: params.deviceId,
       role: params.role,

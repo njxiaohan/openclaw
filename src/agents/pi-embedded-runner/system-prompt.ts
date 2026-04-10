@@ -42,6 +42,7 @@ export function buildEmbeddedSystemPrompt(params: {
     channel?: string;
     /** Supported message actions for the current channel (e.g., react, edit, unsend) */
     channelActions?: string[];
+    canvasRootDir?: string;
   };
   messageToolHints?: string[];
   sandboxInfo?: EmbeddedSandboxInfo;
