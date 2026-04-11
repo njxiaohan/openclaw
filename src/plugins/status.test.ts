@@ -20,6 +20,7 @@ const listImportedBundledPluginFacadeIdsMock = vi.fn();
 const listImportedRuntimePluginIdsMock = vi.fn();
 let buildPluginSnapshotReport: typeof import("./status.js").buildPluginSnapshotReport;
 let buildPluginDiagnosticsReport: typeof import("./status.js").buildPluginDiagnosticsReport;
+let buildPluginSmokeReport: typeof import("./status.js").buildPluginSmokeReport;
 let buildPluginInspectReport: typeof import("./status.js").buildPluginInspectReport;
 let buildAllPluginInspectReports: typeof import("./status.js").buildAllPluginInspectReports;
 let buildPluginCompatibilityNotices: typeof import("./status.js").buildPluginCompatibilityNotices;
@@ -314,6 +315,7 @@ describe("plugin status reports", () => {
       buildAllPluginInspectReports,
       buildPluginCompatibilityNotices,
       buildPluginDiagnosticsReport,
+      buildPluginSmokeReport,
       buildPluginCompatibilityWarnings,
       buildPluginInspectReport,
       buildPluginSnapshotReport,
@@ -605,6 +607,97 @@ describe("plugin status reports", () => {
     expect(inspect?.diagnostics).toEqual([
       { level: "warn", pluginId: "google", message: "watch this surface" },
     ]);
+  });
+
+  it("classifies missing packaged entries in smoke reports", () => {
+    setSinglePluginLoadResult(
+      createPluginRecord({
+        id: "telegram",
+        name: "Telegram",
+        status: "error",
+        failurePhase: "load",
+      }),
+      {
+        diagnostics: [
+          {
+            level: "error",
+            pluginId: "telegram",
+            message:
+              'bundled plugin entry "./src/channel.setup.js" failed to open dist/extensions/telegram/src/channel.setup.js',
+          },
+        ],
+      },
+    );
+
+    const report = buildPluginSmokeReport({ config: {} });
+
+    expect(report.classification).toBe("packaged_entry_missing");
+    expect(report.entries).toEqual([
+      expect.objectContaining({
+        pluginId: "telegram",
+        classification: "packaged_entry_missing",
+      }),
+    ]);
+  });
+
+  it("classifies validation failures in smoke reports", () => {
+    setSinglePluginLoadResult(
+      createPluginRecord({
+        id: "slack",
+        status: "error",
+        failurePhase: "validation",
+      }),
+      {
+        diagnostics: [
+          {
+            level: "error",
+            pluginId: "slack",
+            message: "missing register/activate export",
+          },
+        ],
+      },
+    );
+
+    const report = buildPluginSmokeReport({ config: {} });
+
+    expect(report.classification).toBe("plugin_validation_error");
+    expect(report.entries).toEqual([
+      expect.objectContaining({
+        pluginId: "slack",
+        classification: "plugin_validation_error",
+      }),
+    ]);
+  });
+
+  it("surfaces unscoped loader diagnostics as global smoke failures", () => {
+    setPluginLoadResult({
+      plugins: [
+        createPluginRecord({
+          id: "demo",
+          status: "loaded",
+        }),
+      ],
+      diagnostics: [
+        {
+          level: "error",
+          source: "/tmp/missing-plugin",
+          message: "plugin path not found: /tmp/missing-plugin",
+        },
+      ],
+    });
+
+    const report = buildPluginSmokeReport({ config: {} });
+
+    expect(report.classification).toBe("load_error");
+    expect(report.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          pluginId: "__global__",
+          classification: "load_error",
+        }),
+      ]),
+    );
+    expect(report.summary.errorCount).toBe(1);
   });
 
   it("builds inspect reports for every loaded plugin", () => {

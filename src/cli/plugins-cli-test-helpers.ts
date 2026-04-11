@@ -35,6 +35,7 @@ export const clearPluginManifestRegistryCache: UnknownMock = vi.fn();
 export const loadPluginManifestRegistry: UnknownMock = vi.fn();
 export const buildPluginSnapshotReport: UnknownMock = vi.fn();
 export const buildPluginDiagnosticsReport: UnknownMock = vi.fn();
+export const buildPluginSmokeReport: UnknownMock = vi.fn();
 export const buildPluginCompatibilityNotices: UnknownMock = vi.fn();
 export const applyExclusiveSlotSelection: UnknownMock = vi.fn();
 export const uninstallPlugin: AsyncUnknownMock = vi.fn();
@@ -175,6 +176,16 @@ vi.mock("../plugins/status.js", () => ({
       buildPluginDiagnosticsReport,
       ...args,
     )) as (typeof import("../plugins/status.js"))["buildPluginDiagnosticsReport"],
+  buildPluginSmokeReport: ((
+    ...args: Parameters<(typeof import("../plugins/status.js"))["buildPluginSmokeReport"]>
+  ) =>
+    invokeMock<
+      Parameters<(typeof import("../plugins/status.js"))["buildPluginSmokeReport"]>,
+      ReturnType<(typeof import("../plugins/status.js"))["buildPluginSmokeReport"]>
+    >(
+      buildPluginSmokeReport,
+      ...args,
+    )) as (typeof import("../plugins/status.js"))["buildPluginSmokeReport"],
   buildPluginCompatibilityNotices: ((
     ...args: Parameters<(typeof import("../plugins/status.js"))["buildPluginCompatibilityNotices"]>
   ) =>
@@ -371,6 +382,7 @@ export function resetPluginsCliTestState() {
   loadPluginManifestRegistry.mockReset();
   buildPluginSnapshotReport.mockReset();
   buildPluginDiagnosticsReport.mockReset();
+  buildPluginSmokeReport.mockReset();
   buildPluginCompatibilityNotices.mockReset();
   applyExclusiveSlotSelection.mockReset();
   uninstallPlugin.mockReset();
@@ -431,6 +443,18 @@ export function resetPluginsCliTestState() {
   };
   buildPluginSnapshotReport.mockReturnValue(defaultPluginReport);
   buildPluginDiagnosticsReport.mockReturnValue(defaultPluginReport);
+  buildPluginSmokeReport.mockReturnValue({
+    scenarioId: "bundled-channels",
+    classification: "ok",
+    summary: {
+      pluginCount: 0,
+      loadedCount: 0,
+      errorCount: 0,
+      disabledCount: 0,
+    },
+    entries: [],
+    diagnostics: [],
+  });
   buildPluginCompatibilityNotices.mockReturnValue([]);
   applyExclusiveSlotSelection.mockImplementation((({ config }: { config: OpenClawConfig }) => ({
     config,

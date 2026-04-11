@@ -15,6 +15,7 @@ import {
   buildPluginDiagnosticsReport,
   buildPluginCompatibilityNotices,
   buildPluginInspectReport,
+  buildPluginSmokeReport,
   buildPluginSnapshotReport,
   formatPluginCompatibilityNotice,
 } from "../plugins/status.js";
@@ -48,6 +49,10 @@ export type PluginsListOptions = {
 export type PluginInspectOptions = {
   json?: boolean;
   all?: boolean;
+};
+
+export type PluginSmokeOptions = {
+  json?: boolean;
 };
 
 export type PluginUpdateOptions = {
@@ -566,6 +571,60 @@ export function registerPluginsCli(program: Command) {
         lines.push("", `${theme.error("Error:")} ${inspect.plugin.error}`);
       }
       defaultRuntime.log(lines.join("\n"));
+    });
+
+  plugins
+    .command("smoke")
+    .description("Run structured plugin bootstrap smoke checks")
+    .option("--json", "Print JSON")
+    .action((opts: PluginSmokeOptions) => {
+      const report = buildPluginSmokeReport();
+      const hasFailures = report.classification !== "ok";
+
+      if (opts.json) {
+        defaultRuntime.writeJson(report);
+        if (hasFailures) {
+          defaultRuntime.exit(1);
+        }
+        return;
+      }
+
+      defaultRuntime.log(
+        `${theme.heading("Plugin Smoke")} ${theme.muted(`(${report.classification})`)}`,
+      );
+      defaultRuntime.log(
+        theme.muted(
+          `${report.summary.loadedCount} loaded, ${report.summary.errorCount} errored, ${report.summary.disabledCount} disabled`,
+        ),
+      );
+
+      const failures = report.entries.filter((entry) => entry.classification !== "ok");
+      if (failures.length === 0) {
+        defaultRuntime.log(theme.success("No plugin smoke failures detected."));
+        return;
+      }
+
+      defaultRuntime.log("");
+      for (const entry of failures) {
+        const label =
+          entry.pluginId === "__global__"
+            ? "global diagnostics"
+            : entry.pluginName && entry.pluginName !== entry.pluginId
+              ? `${entry.pluginName} (${entry.pluginId})`
+              : entry.pluginId;
+        defaultRuntime.log(
+          `${theme.command(label)} ${theme.error(entry.classification)} ${theme.muted(`- ${entry.summary}`)}`,
+        );
+        if (entry.failurePhase) {
+          defaultRuntime.log(`  phase: ${entry.failurePhase}`);
+        }
+        for (const diagnostic of entry.diagnostics.slice(0, 3)) {
+          defaultRuntime.log(
+            `  ${theme.muted(`[${diagnostic.level}]`)} ${sanitizeTerminalText(String(diagnostic.message))}`,
+          );
+        }
+      }
+      defaultRuntime.exit(1);
     });
 
   plugins

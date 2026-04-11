@@ -142,6 +142,33 @@ async function runQaMockOpenAi(opts: { host?: string; port?: number }) {
   await runtime.runQaMockOpenAiCommand(opts);
 }
 
+async function runQaReleaseCompare(opts: {
+  repoRoot?: string;
+  outputDir?: string;
+  scenario?: "bundled-channels";
+  keepTemp?: boolean;
+  json?: boolean;
+  timeoutSeconds?: number;
+  oldRef: string;
+  newRef: string;
+}) {
+  const runtime = await loadQaLabCliRuntime();
+  await runtime.runQaReleaseCompareCommand(opts);
+}
+
+async function runQaReleaseSmoke(opts: {
+  repoRoot?: string;
+  outputDir?: string;
+  scenario?: "bundled-channels";
+  keepTemp?: boolean;
+  json?: boolean;
+  timeoutSeconds?: number;
+  ref: string;
+}) {
+  const runtime = await loadQaLabCliRuntime();
+  await runtime.runQaReleaseSmokeCommand(opts);
+}
+
 export function registerQaLabCli(program: Command) {
   const qa = program
     .command("qa")
@@ -212,6 +239,81 @@ export function registerQaLabCli(program: Command) {
           cpus: opts.cpus,
           memory: opts.memory,
           disk: opts.disk,
+        });
+      },
+    );
+
+  qa.command("release-compare")
+    .description(
+      "Install two OpenClaw releases in isolation and compare high-signal QA canary commands",
+    )
+    .argument("<old>", "Older release ref or install target")
+    .argument("<new>", "Newer release ref or install target")
+    .option("--repo-root <path>", "Repository root to target when running from a neutral cwd")
+    .option("--output-dir <path>", "Artifact directory relative to the repo root")
+    .option("--scenario <id>", "Comparison scenario", "bundled-channels")
+    .option("--keep-temp", "Keep temporary install/home directories", false)
+    .option("--json", "Print the full JSON summary to stdout", false)
+    .option("--timeout-seconds <count>", "Per-command timeout in seconds", (value: string) =>
+      Number(value),
+    )
+    .action(
+      async (
+        oldRef: string,
+        newRef: string,
+        opts: {
+          repoRoot?: string;
+          outputDir?: string;
+          scenario?: "bundled-channels";
+          keepTemp?: boolean;
+          json?: boolean;
+          timeoutSeconds?: number;
+        },
+      ) => {
+        await runQaReleaseCompare({
+          repoRoot: opts.repoRoot,
+          outputDir: opts.outputDir,
+          scenario: opts.scenario,
+          keepTemp: opts.keepTemp,
+          json: opts.json,
+          timeoutSeconds: opts.timeoutSeconds,
+          oldRef,
+          newRef,
+        });
+      },
+    );
+
+  qa.command("release-smoke")
+    .description("Install one OpenClaw release in isolation and run the high-signal QA smoke gate")
+    .argument("<ref>", "Release ref or install target")
+    .option("--repo-root <path>", "Repository root to target when running from a neutral cwd")
+    .option("--output-dir <path>", "Artifact directory relative to the repo root")
+    .option("--scenario <id>", "Smoke scenario", "bundled-channels")
+    .option("--keep-temp", "Keep temporary install/home directories", false)
+    .option("--json", "Print the full JSON summary to stdout", false)
+    .option("--timeout-seconds <count>", "Per-command timeout in seconds", (value: string) =>
+      Number(value),
+    )
+    .action(
+      async (
+        ref: string,
+        opts: {
+          repoRoot?: string;
+          outputDir?: string;
+          scenario?: "bundled-channels";
+          keepTemp?: boolean;
+          json?: boolean;
+          timeoutSeconds?: number;
+        },
+      ) => {
+        await runQaReleaseSmoke({
+          repoRoot: opts.repoRoot,
+          outputDir: opts.outputDir,
+          scenario: opts.scenario,
+          keepTemp: opts.keepTemp,
+          json: opts.json,
+          timeoutSeconds: opts.timeoutSeconds,
+          ref,
         });
       },
     );

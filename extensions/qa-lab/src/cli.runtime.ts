@@ -8,6 +8,7 @@ import { runQaManualLane } from "./manual-lane.runtime.js";
 import { startQaMockOpenAiServer } from "./mock-openai-server.js";
 import { runQaMultipass } from "./multipass.runtime.js";
 import { normalizeQaThinkingLevel, type QaThinkingLevel } from "./qa-gateway-config.js";
+import { runQaReleaseCompare, runQaReleaseSmoke } from "./release-compare.js";
 import {
   defaultQaModelForMode,
   normalizeQaProviderMode,
@@ -496,6 +497,81 @@ export async function runQaMockOpenAiCommand(opts: { host?: string; port?: numbe
     port: Number.isFinite(opts.port) ? opts.port : undefined,
   });
   await runInterruptibleServer("QA mock OpenAI", server);
+}
+
+function terminateOneShotQaCommandIfNeeded() {
+  if (process.env.VITEST) {
+    return;
+  }
+  process.exit(process.exitCode ?? 0);
+}
+
+export async function runQaReleaseCompareCommand(opts: {
+  repoRoot?: string;
+  outputDir?: string;
+  scenario?: "bundled-channels";
+  keepTemp?: boolean;
+  json?: boolean;
+  timeoutSeconds?: number;
+  oldRef: string;
+  newRef: string;
+}) {
+  const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
+  const outputDir = resolveRepoRelativeOutputDir(repoRoot, opts.outputDir);
+  const result = await runQaReleaseCompare({
+    repoRoot,
+    oldRef: opts.oldRef,
+    newRef: opts.newRef,
+    scenarioId: opts.scenario ?? "bundled-channels",
+    outputDir,
+    keepTemp: opts.keepTemp,
+    timeoutMs:
+      Number.isFinite(opts.timeoutSeconds) && (opts.timeoutSeconds ?? 0) > 0
+        ? Math.floor((opts.timeoutSeconds ?? 0) * 1000)
+        : undefined,
+  });
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    terminateOneShotQaCommandIfNeeded();
+    return;
+  }
+  process.stdout.write(`QA release compare report: ${result.reportPath}\n`);
+  process.stdout.write(`QA release compare summary: ${result.summaryPath}\n`);
+  terminateOneShotQaCommandIfNeeded();
+}
+
+export async function runQaReleaseSmokeCommand(opts: {
+  repoRoot?: string;
+  outputDir?: string;
+  scenario?: "bundled-channels";
+  keepTemp?: boolean;
+  json?: boolean;
+  timeoutSeconds?: number;
+  ref: string;
+}) {
+  const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
+  const outputDir = resolveRepoRelativeOutputDir(repoRoot, opts.outputDir);
+  const result = await runQaReleaseSmoke({
+    repoRoot,
+    ref: opts.ref,
+    scenarioId: opts.scenario ?? "bundled-channels",
+    outputDir,
+    keepTemp: opts.keepTemp,
+    timeoutMs:
+      Number.isFinite(opts.timeoutSeconds) && (opts.timeoutSeconds ?? 0) > 0
+        ? Math.floor((opts.timeoutSeconds ?? 0) * 1000)
+        : undefined,
+  });
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    process.stdout.write(`QA release smoke report: ${result.reportPath}\n`);
+    process.stdout.write(`QA release smoke summary: ${result.summaryPath}\n`);
+  }
+  if (result.classification !== "ok") {
+    process.exitCode = 1;
+  }
+  terminateOneShotQaCommandIfNeeded();
 }
 
 export const __testing = {

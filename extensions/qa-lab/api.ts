@@ -11,6 +11,7 @@ export * from "./src/qa-agent-bootstrap.js";
 export * from "./src/qa-agent-workspace.js";
 export * from "./src/qa-gateway-config.js";
 export * from "./src/report.js";
+export * from "./src/release-compare.js";
 export * from "./src/scenario.js";
 export * from "./src/scenario-catalog.js";
 export * from "./src/self-check-scenario.js";
