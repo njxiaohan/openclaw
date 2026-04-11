@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   classifyReleaseCompareCommandOutput,
   compareReleaseCompareResults,
+  redactPersistedCommandText,
+  resolveQaReleaseOutputDir,
   summarizeInstallClassification,
 } from "./release-compare.js";
 
@@ -107,5 +109,33 @@ describe("qa release compare", () => {
         ],
       }),
     ).toBe("load_error");
+  });
+
+  it("accepts repo-contained absolute output dirs after CLI normalization", () => {
+    expect(
+      resolveQaReleaseOutputDir({
+        repoRoot: "/tmp/openclaw-repo",
+        outputDir: "/tmp/openclaw-repo/.artifacts/qa/release-smoke/2026.4.10",
+        fallbackParts: [".artifacts", "qa", "release-smoke", "2026.4.10"],
+      }),
+    ).toBe("/tmp/openclaw-repo/.artifacts/qa/release-smoke/2026.4.10");
+  });
+
+  it("redacts sensitive command output before persistence", () => {
+    expect(
+      redactPersistedCommandText(
+        [
+          "Authorization: Bearer topsecret",
+          "OPENAI_API_KEY=sk-secret-token",
+          "SLACK_BOT_TOKEN=xoxb-secret-token",
+        ].join("\n"),
+      ),
+    ).toBe(
+      [
+        "Authorization: Bearer <REDACTED>",
+        "OPENAI_API_KEY=<REDACTED>",
+        "SLACK_BOT_TOKEN=<REDACTED>",
+      ].join("\n"),
+    );
   });
 });

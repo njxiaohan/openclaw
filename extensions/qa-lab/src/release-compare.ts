@@ -105,6 +105,34 @@ function buildInstallCommandEnv() {
   };
 }
 
+export function redactPersistedCommandText(text: string) {
+  return text
+    .replace(/(Authorization:\s*Bearer\s+)[^\s\r\n]+/gi, "$1<REDACTED>")
+    .replace(
+      /((?:^|[\s"'`])(?:[A-Z0-9_]*?(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|REFRESH_TOKEN))\s*[=:]\s*)[^\s\r\n"'`]+/gm,
+      "$1<REDACTED>",
+    )
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, "<REDACTED>")
+    .replace(/\b(xox[baprs]-[A-Za-z0-9-]{10,})\b/g, "<REDACTED>");
+}
+
+function buildRuntimeCommandEnv(homeDir: string) {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? "",
+    TMPDIR: process.env.TMPDIR ?? "",
+    TMP: process.env.TMP ?? "",
+    TEMP: process.env.TEMP ?? "",
+    TERM: process.env.TERM ?? "",
+    LANG: process.env.LANG ?? "",
+    LC_ALL: process.env.LC_ALL ?? "",
+    LC_CTYPE: process.env.LC_CTYPE ?? "",
+    CI: process.env.CI ?? "",
+    NO_COLOR: process.env.NO_COLOR ?? "",
+    OPENCLAW_HOME: homeDir,
+  };
+}
+
 function scenarioCommands(scenarioId: QaReleaseCompareScenarioId): QaReleaseCompareCommandSpec[] {
   switch (scenarioId) {
     case "bundled-channels":
@@ -263,10 +291,7 @@ function scheduleTempRootCleanup(tempRoot: string) {
 async function readVersion(binPath: string, homeDir: string, cwd: string) {
   const { stdout } = await execFileAsync(binPath, ["--version"], {
     cwd,
-    env: {
-      ...process.env,
-      OPENCLAW_HOME: homeDir,
-    },
+    env: buildRuntimeCommandEnv(homeDir),
     maxBuffer: 1024 * 1024 * 2,
   });
   return stdout.trim();
@@ -296,10 +321,7 @@ async function runReleaseCommand(params: {
   try {
     const result = await execFileAsync(params.binPath, params.command.args, {
       cwd: params.cwd,
-      env: {
-        ...process.env,
-        OPENCLAW_HOME: params.homeDir,
-      },
+      env: buildRuntimeCommandEnv(params.homeDir),
       timeout: params.timeoutMs,
       maxBuffer: 1024 * 1024 * 8,
     });
@@ -387,8 +409,16 @@ async function writeCommandArtifacts(outputDir: string, install: QaReleaseCompar
   await mkdir(commandsDir, { recursive: true });
   for (const commandResult of install.commandResults) {
     const baseName = sanitizeSegment(commandResult.id) || "command";
-    await writeFile(path.join(commandsDir, `${baseName}.stdout.txt`), commandResult.stdout, "utf8");
-    await writeFile(path.join(commandsDir, `${baseName}.stderr.txt`), commandResult.stderr, "utf8");
+    await writeFile(
+      path.join(commandsDir, `${baseName}.stdout.txt`),
+      redactPersistedCommandText(commandResult.stdout),
+      "utf8",
+    );
+    await writeFile(
+      path.join(commandsDir, `${baseName}.stderr.txt`),
+      redactPersistedCommandText(commandResult.stderr),
+      "utf8",
+    );
   }
 }
 
@@ -414,15 +444,60 @@ function resolveInstallRef(ref: string, repoRoot: string, allowUnsafeInstallRef 
   return `openclaw@${ref}`;
 }
 
-function resolveQaReleaseOutputDir(params: {
+export function resolveQaReleaseOutputDir(params: {
   repoRoot: string;
   outputDir?: string;
   fallbackParts: string[];
 }) {
+  if (params.outputDir) {
+    if (path.isAbsolute(params.outputDir)) {
+      const resolvedRepoRoot = path.resolve(params.repoRoot);
+      const resolvedOutputDir = path.resolve(params.outputDir);
+      const relative = path.relative(resolvedRepoRoot, resolvedOutputDir);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error("--output-dir must stay within the repo root.");
+      }
+      return resolvedOutputDir;
+    }
+  }
   return (
     resolveRepoRelativeOutputDir(params.repoRoot, params.outputDir) ??
     path.join(params.repoRoot, ...params.fallbackParts)
   );
+}
+
+function toPersistedCommandResult(commandResult: QaReleaseCompareCommandResult) {
+  const rest = { ...commandResult };
+  delete rest.stdout;
+  delete rest.stderr;
+  return rest;
+}
+
+function toPersistedInstall(install: QaReleaseCompareInstall) {
+  return {
+    ...install,
+    commandResults: install.commandResults.map(toPersistedCommandResult),
+  };
+}
+
+function toPersistedSmokeResult(result: QaReleaseSmokeResult) {
+  return {
+    ...result,
+    install: toPersistedInstall(result.install),
+  };
+}
+
+function toPersistedCompareResult(result: QaReleaseCompareResult) {
+  return {
+    ...result,
+    oldInstall: toPersistedInstall(result.oldInstall),
+    newInstall: toPersistedInstall(result.newInstall),
+    diff: result.diff.map((entry) => ({
+      ...entry,
+      old: toPersistedCommandResult(entry.old),
+      new: toPersistedCommandResult(entry.new),
+    })),
+  };
 }
 
 async function createIsolatedInstall(params: {
@@ -548,7 +623,11 @@ export async function runQaReleaseSmoke(
 
     await writeCommandArtifacts(outputDir, install);
     await writeFile(result.reportPath, renderSmokeMarkdownReport(result), "utf8");
-    await writeFile(result.summaryPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    await writeFile(
+      result.summaryPath,
+      `${JSON.stringify(toPersistedSmokeResult(result), null, 2)}\n`,
+      "utf8",
+    );
     return result;
   } finally {
     if (!params.keepTemp) {
@@ -626,7 +705,11 @@ export async function runQaReleaseCompare(
     await writeCommandArtifacts(outputDir, oldInstall);
     await writeCommandArtifacts(outputDir, newInstall);
     await writeFile(result.reportPath, renderMarkdownReport(result), "utf8");
-    await writeFile(result.summaryPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    await writeFile(
+      result.summaryPath,
+      `${JSON.stringify(toPersistedCompareResult(result), null, 2)}\n`,
+      "utf8",
+    );
     return result;
   } finally {
     if (!params.keepTemp) {
