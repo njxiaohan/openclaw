@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const execFileMock = vi.hoisted(() => vi.fn());
 
@@ -17,6 +16,7 @@ vi.mock("node:child_process", async () => {
   );
 });
 
+import path from "node:path";
 import { splitArgsPreservingQuotes } from "./arg-split.js";
 import { parseSystemdExecStart } from "./systemd-unit.js";
 import {
@@ -26,6 +26,7 @@ import {
   parseSystemdShow,
   readSystemdServiceExecStart,
   restartSystemdService,
+  resolveSystemdUserManagedDropInPath,
   resolveSystemdUserUnitPath,
   stageSystemdService,
   stopSystemdService,
@@ -527,7 +528,8 @@ describe("readSystemdServiceExecStart", () => {
 
     const command = await readSystemdServiceExecStart({ HOME: TEST_SERVICE_HOME });
     expect(command?.environment?.OPENCLAW_GATEWAY_TOKEN).toBe("env-file-token");
-    expect(readFileSpy).toHaveBeenCalledTimes(2);
+    // Main unit + managed drop-in probe (absent here) + resolved env file.
+    expect(readFileSpy).toHaveBeenCalledTimes(3);
   });
 
   it("lets EnvironmentFile override inline Environment values", async () => {
@@ -639,116 +641,6 @@ describe("readSystemdServiceExecStart", () => {
       OPENCLAW_GATEWAY_TOKEN: "file",
       OPENCLAW_GATEWAY_PASSWORD: "file", // pragma: allowlist secret
     });
-  });
-});
-
-describe("stageSystemdService", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    execFileMock.mockReset();
-  });
-
-  it("writes dotenv-backed values to a separate env file and keeps inline env minimal", async () => {
-    const tempHomeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-systemd-stage-"));
-    const home = path.join(tempHomeRoot, "home");
-    const stateDir = path.join(home, ".openclaw");
-    const env = {
-      HOME: home,
-      OPENCLAW_STATE_DIR: stateDir,
-      OPENCLAW_SYSTEMD_UNIT: "openclaw-gateway-stage-test",
-    };
-    const unitPath = resolveSystemdUserUnitPath(env);
-    const envFilePath = path.join(stateDir, "gateway.systemd.env");
-
-    await fs.mkdir(stateDir, { recursive: true });
-    await fs.writeFile(
-      path.join(stateDir, ".env"),
-      ["OPENCLAW_GATEWAY_TOKEN=dotenv-token", "LLM_API_KEY=dotenv-key"].join("\n"),
-      "utf8",
-    );
-
-    execFileMock.mockImplementationOnce((_cmd, args, _opts, cb) => {
-      assertUserSystemctlArgs(args, "status");
-      cb(null, "", "");
-    });
-
-    try {
-      await stageSystemdService({
-        env,
-        stdout: { write: vi.fn() } as unknown as NodeJS.WritableStream,
-        programArguments: ["/usr/bin/openclaw", "gateway", "run"],
-        workingDirectory: "/tmp",
-        environment: {
-          OPENCLAW_GATEWAY_TOKEN: "dotenv-token",
-          LLM_API_KEY: "dotenv-key",
-          OPENCLAW_GATEWAY_PORT: "18789",
-        },
-      });
-
-      const [unit, envFile, envFileStat] = await Promise.all([
-        fs.readFile(unitPath, "utf8"),
-        fs.readFile(envFilePath, "utf8"),
-        fs.stat(envFilePath),
-      ]);
-
-      expect(unit).toContain(`EnvironmentFile=-${envFilePath}`);
-      expect(unit).toContain("Environment=OPENCLAW_GATEWAY_PORT=18789");
-      expect(unit).not.toContain("Environment=OPENCLAW_GATEWAY_TOKEN=dotenv-token");
-      expect(unit).not.toContain("Environment=LLM_API_KEY=dotenv-key");
-      expect(envFile).toBe("OPENCLAW_GATEWAY_TOKEN=dotenv-token\nLLM_API_KEY=dotenv-key\n");
-      expect(envFileStat.mode & 0o777).toBe(0o600);
-    } finally {
-      await fs.rm(tempHomeRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps inline overrides out of the generated env file", async () => {
-    const tempHomeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-systemd-stage-"));
-    const home = path.join(tempHomeRoot, "home");
-    const stateDir = path.join(home, ".openclaw");
-    const env = {
-      HOME: home,
-      OPENCLAW_STATE_DIR: stateDir,
-      OPENCLAW_SYSTEMD_UNIT: "openclaw-gateway-stage-test",
-    };
-    const unitPath = resolveSystemdUserUnitPath(env);
-    const envFilePath = path.join(stateDir, "gateway.systemd.env");
-
-    await fs.mkdir(stateDir, { recursive: true });
-    await fs.writeFile(
-      path.join(stateDir, ".env"),
-      ["OPENCLAW_GATEWAY_TOKEN=stale-token", "LLM_API_KEY=dotenv-key"].join("\n"),
-      "utf8",
-    );
-
-    execFileMock.mockImplementationOnce((_cmd, args, _opts, cb) => {
-      assertUserSystemctlArgs(args, "status");
-      cb(null, "", "");
-    });
-
-    try {
-      await stageSystemdService({
-        env,
-        stdout: { write: vi.fn() } as unknown as NodeJS.WritableStream,
-        programArguments: ["/usr/bin/openclaw", "gateway", "run"],
-        workingDirectory: "/tmp",
-        environment: {
-          OPENCLAW_GATEWAY_TOKEN: "fresh-token",
-          LLM_API_KEY: "dotenv-key",
-        },
-      });
-
-      const [unit, envFile] = await Promise.all([
-        fs.readFile(unitPath, "utf8"),
-        fs.readFile(envFilePath, "utf8"),
-      ]);
-
-      expect(unit).toContain(`EnvironmentFile=-${envFilePath}`);
-      expect(unit).toContain("Environment=OPENCLAW_GATEWAY_TOKEN=fresh-token");
-      expect(envFile).toBe("LLM_API_KEY=dotenv-key\n");
-    } finally {
-      await fs.rm(tempHomeRoot, { recursive: true, force: true });
-    }
   });
 });
 
@@ -896,5 +788,320 @@ describe("systemd service control", () => {
         cb(null, "", "");
       });
     await assertRestartSuccess({ USER: "debian" });
+  });
+});
+
+describe("stageSystemdService drop-in migration", () => {
+  const tempHomes: string[] = [];
+
+  beforeEach(() => {
+    // Clear fs.readFile spies from earlier describe blocks so this one runs
+    // against real fs. We want real file-write behavior here — only the
+    // systemctl probe should be mocked.
+    vi.restoreAllMocks();
+    execFileMock.mockReset();
+    // Every writeSystemdUnit path asserts systemd is available before touching
+    // disk. Return success for any systemctl call so the integration can focus
+    // on file-write behavior.
+    execFileMock.mockImplementation((_cmd, _args, _opts, cb) => {
+      cb(null, "", "");
+    });
+  });
+
+  afterEach(async () => {
+    const cleanupTargets = tempHomes.splice(0);
+    await Promise.all(
+      cleanupTargets.map(async (tmpHome) => {
+        await fs.rm(tmpHome, { recursive: true, force: true });
+      }),
+    );
+  });
+
+  async function makeTempHome(): Promise<string> {
+    const tmpRoot = os.tmpdir();
+    const tmpHome = await fs.mkdtemp(path.join(tmpRoot, "openclaw-systemd-test-"));
+    tempHomes.push(tmpHome);
+    return tmpHome;
+  }
+
+  it("writes main unit + managed drop-in on a fresh install", async () => {
+    const tmpHome = await makeTempHome();
+    const env = { HOME: tmpHome };
+    const { stdout } = createWritableStreamMock();
+
+    await stageSystemdService({
+      env,
+      stdout,
+      description: "OpenClaw Gateway",
+      programArguments: [
+        "/usr/bin/node",
+        "/opt/openclaw/dist/index.js",
+        "gateway",
+        "--port",
+        "18789",
+      ],
+      environment: {
+        OPENCLAW_GATEWAY_TOKEN: "fresh-token",
+        OPENCLAW_SERVICE_VERSION: "2026.4.12",
+        OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "OPENCLAW_GATEWAY_TOKEN,OPENCLAW_SERVICE_VERSION",
+        HOME: tmpHome,
+        PATH: "/usr/bin",
+      },
+    });
+
+    const unitPath = resolveSystemdUserUnitPath(env);
+    const dropInPath = resolveSystemdUserManagedDropInPath(env);
+    const unitText = await fs.readFile(unitPath, "utf8");
+    const dropInText = await fs.readFile(dropInPath, "utf8");
+
+    // Main unit has non-managed env inline but no managed keys or sentinel.
+    expect(unitText).toContain(
+      "ExecStart=/usr/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
+    );
+    expect(unitText).toContain(`Environment=HOME=${tmpHome}`);
+    expect(unitText).toContain("Environment=PATH=/usr/bin");
+    expect(unitText).not.toContain("OPENCLAW_GATEWAY_TOKEN");
+    expect(unitText).not.toContain("OPENCLAW_SERVICE_MANAGED_ENV_KEYS");
+
+    // Drop-in carries the managed keys + sentinel.
+    expect(dropInText).toContain("Environment=OPENCLAW_GATEWAY_TOKEN=fresh-token");
+    expect(dropInText).toContain("Environment=OPENCLAW_SERVICE_VERSION=2026.4.12");
+    expect(dropInText).toContain(
+      "Environment=OPENCLAW_SERVICE_MANAGED_ENV_KEYS=OPENCLAW_GATEWAY_TOKEN,OPENCLAW_SERVICE_VERSION",
+    );
+    expect(dropInText).toContain("Auto-managed by openclaw");
+  });
+
+  it("migrates inline managed env out of a legacy unit while preserving user EnvironmentFile= and Environment=", async () => {
+    const tmpHome = await makeTempHome();
+    const env = { HOME: tmpHome };
+    const { stdout } = createWritableStreamMock();
+
+    // Seed a legacy-style unit with inline managed env + user customizations.
+    const unitPath = resolveSystemdUserUnitPath(env);
+    await fs.mkdir(path.dirname(unitPath), { recursive: true });
+    const legacyUnit = [
+      "[Unit]",
+      "Description=OpenClaw Gateway (v2026.4.11)",
+      "",
+      "[Service]",
+      "ExecStart=/usr/bin/node /opt/openclaw/dist/entry.js gateway --port 18789",
+      "Restart=always",
+      "Environment=OPENCLAW_GATEWAY_TOKEN=legacy-token",
+      "Environment=OPENCLAW_SERVICE_VERSION=2026.4.11",
+      `EnvironmentFile=${tmpHome}/.openclaw/workspace/.env`,
+      `Environment=HOME=${tmpHome}`,
+      "Environment=USER_ADDED_VAR=keep-this",
+      "Environment=OPENCLAW_SERVICE_MANAGED_ENV_KEYS=OPENCLAW_GATEWAY_TOKEN,OPENCLAW_SERVICE_VERSION",
+      "",
+      "[Install]",
+      "WantedBy=default.target",
+      "",
+    ].join("\n");
+    await fs.writeFile(unitPath, legacyUnit, "utf8");
+
+    await stageSystemdService({
+      env,
+      stdout,
+      description: "OpenClaw Gateway",
+      // Entry filename intentionally bumped entry.js -> index.js to verify
+      // the targeted ExecStart update hits only that line.
+      programArguments: [
+        "/usr/bin/node",
+        "/opt/openclaw/dist/index.js",
+        "gateway",
+        "--port",
+        "18789",
+      ],
+      environment: {
+        OPENCLAW_GATEWAY_TOKEN: "rotated-token",
+        OPENCLAW_SERVICE_VERSION: "2026.4.12",
+        OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "OPENCLAW_GATEWAY_TOKEN,OPENCLAW_SERVICE_VERSION",
+        HOME: tmpHome,
+      },
+    });
+
+    const dropInPath = resolveSystemdUserManagedDropInPath(env);
+    const unitText = await fs.readFile(unitPath, "utf8");
+    const dropInText = await fs.readFile(dropInPath, "utf8");
+
+    // Managed env is gone from the main unit.
+    expect(unitText).not.toContain("OPENCLAW_GATEWAY_TOKEN");
+    expect(unitText).not.toContain("OPENCLAW_SERVICE_VERSION=");
+    expect(unitText).not.toContain("OPENCLAW_SERVICE_MANAGED_ENV_KEYS");
+
+    // User customizations survived migration byte-for-byte.
+    expect(unitText).toContain(`EnvironmentFile=${tmpHome}/.openclaw/workspace/.env`);
+    expect(unitText).toContain("Environment=USER_ADDED_VAR=keep-this");
+    expect(unitText).toContain(`Environment=HOME=${tmpHome}`);
+    expect(unitText).toContain("[Install]");
+    expect(unitText).toContain("WantedBy=default.target");
+
+    // ExecStart was updated (entry.js -> index.js) without touching anything
+    // else on that line or adjacent lines.
+    expect(unitText).toContain(
+      "ExecStart=/usr/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
+    );
+    expect(unitText).not.toContain("dist/entry.js");
+
+    // Drop-in holds the rotated managed values; old values are not sticky.
+    expect(dropInText).toContain("Environment=OPENCLAW_GATEWAY_TOKEN=rotated-token");
+    expect(dropInText).toContain("Environment=OPENCLAW_SERVICE_VERSION=2026.4.12");
+    expect(dropInText).not.toContain("legacy-token");
+    expect(dropInText).not.toContain("2026.4.11");
+
+    // Backup of the pre-migration unit is captured alongside.
+    await expect(fs.access(`${unitPath}.bak`)).resolves.toBeUndefined();
+  });
+
+  it("rebuilds the main unit when a legacy file is missing ExecStart", async () => {
+    const tmpHome = await makeTempHome();
+    const env = { HOME: tmpHome };
+    const { stdout } = createWritableStreamMock();
+
+    const unitPath = resolveSystemdUserUnitPath(env);
+    await fs.mkdir(path.dirname(unitPath), { recursive: true });
+    const malformedUnit = [
+      "[Unit]",
+      "Description=OpenClaw Gateway (broken)",
+      "",
+      "[Service]",
+      "Restart=always",
+      "Environment=OPENCLAW_GATEWAY_TOKEN=legacy-token",
+      "Environment=OPENCLAW_SERVICE_MANAGED_ENV_KEYS=OPENCLAW_GATEWAY_TOKEN",
+      "",
+      "[Install]",
+      "WantedBy=default.target",
+      "",
+    ].join("\n");
+    await fs.writeFile(unitPath, malformedUnit, "utf8");
+
+    await stageSystemdService({
+      env,
+      stdout,
+      description: "OpenClaw Gateway",
+      programArguments: [
+        "/usr/bin/node",
+        "/opt/openclaw/dist/index.js",
+        "gateway",
+        "--port",
+        "18789",
+      ],
+      workingDirectory: "/srv/openclaw",
+      environment: {
+        OPENCLAW_GATEWAY_TOKEN: "rotated-token",
+        OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "OPENCLAW_GATEWAY_TOKEN",
+        HOME: tmpHome,
+      },
+    });
+
+    const unitText = await fs.readFile(unitPath, "utf8");
+    const dropInText = await fs.readFile(resolveSystemdUserManagedDropInPath(env), "utf8");
+
+    expect(unitText).toContain(
+      "ExecStart=/usr/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
+    );
+    expect(unitText).toContain("WorkingDirectory=/srv/openclaw");
+    expect(unitText).not.toContain("OPENCLAW_GATEWAY_TOKEN");
+    expect(dropInText).toContain("Environment=OPENCLAW_GATEWAY_TOKEN=rotated-token");
+    await expect(fs.access(`${unitPath}.bak`)).resolves.toBeUndefined();
+  });
+
+  it("updates stale WorkingDirectory without rewriting user directives", async () => {
+    const tmpHome = await makeTempHome();
+    const env = { HOME: tmpHome };
+    const { stdout } = createWritableStreamMock();
+
+    const unitPath = resolveSystemdUserUnitPath(env);
+    await fs.mkdir(path.dirname(unitPath), { recursive: true });
+    const legacyUnit = [
+      "[Unit]",
+      "Description=OpenClaw Gateway",
+      "",
+      "[Service]",
+      "ExecStart=/usr/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
+      "Restart=always",
+      "KillMode=control-group",
+      "WorkingDirectory=/old/worktree",
+      `Environment=HOME=${tmpHome}`,
+      `EnvironmentFile=${tmpHome}/.openclaw/workspace/.env`,
+      "Environment=OPENCLAW_GATEWAY_TOKEN=legacy-token",
+      "Environment=OPENCLAW_SERVICE_MANAGED_ENV_KEYS=OPENCLAW_GATEWAY_TOKEN",
+      "",
+      "[Install]",
+      "WantedBy=default.target",
+      "",
+    ].join("\n");
+    await fs.writeFile(unitPath, legacyUnit, "utf8");
+
+    await stageSystemdService({
+      env,
+      stdout,
+      description: "OpenClaw Gateway",
+      programArguments: [
+        "/usr/bin/node",
+        "/opt/openclaw/dist/index.js",
+        "gateway",
+        "--port",
+        "18789",
+      ],
+      workingDirectory: "/new/worktree",
+      environment: {
+        OPENCLAW_GATEWAY_TOKEN: "rotated-token",
+        OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "OPENCLAW_GATEWAY_TOKEN",
+        HOME: tmpHome,
+      },
+    });
+
+    const unitText = await fs.readFile(unitPath, "utf8");
+
+    expect(unitText).toContain("WorkingDirectory=/new/worktree");
+    expect(unitText).not.toContain("WorkingDirectory=/old/worktree");
+    expect(unitText).toContain(`EnvironmentFile=${tmpHome}/.openclaw/workspace/.env`);
+    expect(unitText).toContain(`Environment=HOME=${tmpHome}`);
+  });
+
+  it("leaves main unit byte-identical when nothing drifted between upgrades", async () => {
+    const tmpHome = await makeTempHome();
+    const env = { HOME: tmpHome };
+    const { stdout } = createWritableStreamMock();
+
+    // First install — writes the initial main unit + drop-in.
+    const programArguments = [
+      "/usr/bin/node",
+      "/opt/openclaw/dist/index.js",
+      "gateway",
+      "--port",
+      "18789",
+    ];
+    const baseEnv = {
+      OPENCLAW_GATEWAY_TOKEN: "token",
+      OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "OPENCLAW_GATEWAY_TOKEN",
+      HOME: tmpHome,
+    };
+    await stageSystemdService({
+      env,
+      stdout,
+      description: "OpenClaw Gateway",
+      programArguments,
+      environment: baseEnv,
+    });
+
+    const unitPath = resolveSystemdUserUnitPath(env);
+    const firstUnit = await fs.readFile(unitPath, "utf8");
+
+    // Second install with the same ExecStart and same user env — main unit
+    // should be untouched (not even a .bak should appear).
+    await stageSystemdService({
+      env,
+      stdout,
+      description: "OpenClaw Gateway",
+      programArguments,
+      environment: { ...baseEnv, OPENCLAW_GATEWAY_TOKEN: "rotated-token" },
+    });
+
+    const secondUnit = await fs.readFile(unitPath, "utf8");
+    expect(secondUnit).toBe(firstUnit);
+    await expect(fs.access(`${unitPath}.bak`)).rejects.toThrow();
   });
 });
