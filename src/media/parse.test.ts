@@ -120,10 +120,10 @@ describe("splitMediaFromOutput", () => {
 
   it("extracts multiple markdown image urls in order", () => {
     expectParsedMediaOutputCase(
-      "Before\n![one](https://example.com/one.png)\nMiddle\n![two](./out/two.png)\nAfter",
+      "Before\n![one](https://example.com/one.png)\nMiddle\n![two](https://example.com/two.png)\nAfter",
       {
         text: "Before\nMiddle\nAfter",
-        mediaUrls: ["https://example.com/one.png", "./out/two.png"],
+        mediaUrls: ["https://example.com/one.png", "https://example.com/two.png"],
       },
     );
   });
@@ -136,5 +136,23 @@ describe("splitMediaFromOutput", () => {
         mediaUrls: ["https://example.com/chart.png"],
       },
     );
+  });
+
+  it("keeps balanced parentheses inside markdown image urls", () => {
+    expectParsedMediaOutputCase("Chart ![img](https://example.com/a_(1).png) now", {
+      text: "Chart now",
+      mediaUrls: ["https://example.com/a_(1).png"],
+    });
+  });
+
+  it.each([
+    "![x](file:///etc/passwd)",
+    "![x](/var/run/secrets/kubernetes.io/serviceaccount/token)",
+    "![x](C:\\\\Windows\\\\System32\\\\drivers\\\\etc\\\\hosts)",
+  ] as const)("does not lift local markdown image target: %s", (input) => {
+    expectParsedMediaOutputCase(input, {
+      text: input,
+      mediaUrls: undefined,
+    });
   });
 });
