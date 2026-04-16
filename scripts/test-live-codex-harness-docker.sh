@@ -81,11 +81,17 @@ fi
 EXTERNAL_AUTH_MOUNTS=()
 if ((${#AUTH_FILES[@]} > 0)); then
   for auth_file in "${AUTH_FILES[@]}"; do
+    auth_file="$(openclaw_live_validate_relative_home_path "$auth_file")"
     host_path="$HOME/$auth_file"
     if [[ -f "$host_path" ]]; then
       EXTERNAL_AUTH_MOUNTS+=(-v "$host_path":/host-auth-files/"$auth_file":ro)
     fi
   done
+fi
+
+DOCKER_AUTH_ENV=()
+if [[ "$CODEX_HARNESS_AUTH_MODE" == "api-key" ]]; then
+  DOCKER_AUTH_ENV+=(-e OPENAI_API_KEY)
 fi
 
 read -r -d '' LIVE_TEST_CMD <<'EOF' || true
@@ -166,9 +172,9 @@ docker run --rm -t \
   -e OPENCLAW_LIVE_CODEX_HARNESS_IMAGE_PROBE="${OPENCLAW_LIVE_CODEX_HARNESS_IMAGE_PROBE:-1}" \
   -e OPENCLAW_LIVE_CODEX_HARNESS_MCP_PROBE="${OPENCLAW_LIVE_CODEX_HARNESS_MCP_PROBE:-1}" \
   -e OPENCLAW_LIVE_CODEX_HARNESS_MODEL="${OPENCLAW_LIVE_CODEX_HARNESS_MODEL:-codex/gpt-5.4}" \
-  -e OPENAI_API_KEY \
   -e OPENCLAW_LIVE_TEST=1 \
   -e OPENCLAW_VITEST_FS_MODULE_CACHE=0 \
+  "${DOCKER_AUTH_ENV[@]}" \
   "${DOCKER_HOME_MOUNT[@]}" \
   -v "$CACHE_HOME_DIR":/home/node/.cache \
   -v "$ROOT_DIR":/src:ro \

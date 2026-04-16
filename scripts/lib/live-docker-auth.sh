@@ -18,12 +18,31 @@ openclaw_live_trim() {
   printf '%s' "$value"
 }
 
+openclaw_live_validate_relative_home_path() {
+  local value
+  value="$(openclaw_live_trim "${1:-}")"
+  [[ -n "$value" ]] || {
+    echo "ERROR: empty auth path." >&2
+    return 1
+  }
+  case "$value" in
+    /* | *..* | *\\* | *:*)
+      echo "ERROR: invalid auth path '$value'." >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$value"
+}
+
 openclaw_live_normalize_auth_dir() {
   local value
   value="$(openclaw_live_trim "${1:-}")"
   [[ -n "$value" ]] || return 1
-  value="${value#.}"
-  printf '.%s' "$value"
+  if [[ "$value" != .* ]]; then
+    value=".$value"
+  fi
+  value="$(openclaw_live_validate_relative_home_path "$value")" || return 1
+  printf '%s' "$value"
 }
 
 openclaw_live_should_include_auth_dir_for_provider() {
