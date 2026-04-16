@@ -27,6 +27,8 @@ const CODEX_HARNESS_IMAGE_PROBE = isTruthyEnvValue(
   process.env.OPENCLAW_LIVE_CODEX_HARNESS_IMAGE_PROBE,
 );
 const CODEX_HARNESS_MCP_PROBE = isTruthyEnvValue(process.env.OPENCLAW_LIVE_CODEX_HARNESS_MCP_PROBE);
+const CODEX_HARNESS_AUTH_MODE =
+  process.env.OPENCLAW_LIVE_CODEX_HARNESS_AUTH === "api-key" ? "api-key" : "codex-auth";
 const describeLive = LIVE && CODEX_HARNESS_LIVE ? describe : describe.skip;
 const describeDisabled = LIVE && !CODEX_HARNESS_LIVE ? describe : describe.skip;
 const CODEX_HARNESS_TIMEOUT_MS = 420_000;
@@ -428,11 +430,13 @@ describeLive("gateway live (Codex harness)", () => {
       clearRuntimeConfigSnapshot();
       process.env.OPENCLAW_AGENT_RUNTIME = "codex";
       process.env.OPENCLAW_AGENT_HARNESS_FALLBACK = "none";
-      // This lane is meant to validate the plugin-owned Codex app-server
-      // against the staged `~/.codex` auth files, not a generic OpenAI API-key
-      // transport that can bypass the harness entirely.
-      delete process.env.OPENAI_API_KEY;
-      delete process.env.OPENAI_BASE_URL;
+      // Keep the runtime fixed on the plugin-owned Codex app-server harness.
+      // CI can opt into API-key auth to avoid stale OAuth refresh secrets,
+      // while local maintainer runs can continue exercising staged ~/.codex auth.
+      if (CODEX_HARNESS_AUTH_MODE !== "api-key") {
+        delete process.env.OPENAI_API_KEY;
+        delete process.env.OPENAI_BASE_URL;
+      }
       process.env.OPENCLAW_CONFIG_PATH = configPath;
       process.env.OPENCLAW_GATEWAY_TOKEN = token;
       process.env.OPENCLAW_SKIP_BROWSER_CONTROL_SERVER = "1";

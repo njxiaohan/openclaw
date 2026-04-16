@@ -8,9 +8,24 @@ LIVE_IMAGE_NAME="${OPENCLAW_LIVE_IMAGE:-${IMAGE_NAME}-live}"
 CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}"
 WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}"
 PROFILE_FILE="${OPENCLAW_PROFILE_FILE:-$HOME/.profile}"
+CODEX_HARNESS_AUTH_MODE="${OPENCLAW_LIVE_CODEX_HARNESS_AUTH:-codex-auth}"
 TEMP_DIRS=()
 DOCKER_USER="${OPENCLAW_DOCKER_USER:-node}"
 DOCKER_HOME_MOUNT=()
+
+case "$CODEX_HARNESS_AUTH_MODE" in
+  codex-auth | api-key)
+    ;;
+  *)
+    echo "ERROR: OPENCLAW_LIVE_CODEX_HARNESS_AUTH must be one of: codex-auth, api-key." >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$CODEX_HARNESS_AUTH_MODE" == "api-key" && -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "ERROR: OPENCLAW_LIVE_CODEX_HARNESS_AUTH=api-key requires OPENAI_API_KEY." >&2
+  exit 1
+fi
 
 cleanup_temp_dirs() {
   if ((${#TEMP_DIRS[@]} > 0)); then
@@ -51,10 +66,12 @@ if [[ -f "$PROFILE_FILE" && -r "$PROFILE_FILE" ]]; then
 fi
 
 AUTH_FILES=()
-while IFS= read -r auth_file; do
-  [[ -n "$auth_file" ]] || continue
-  AUTH_FILES+=("$auth_file")
-done < <(openclaw_live_collect_auth_files_from_csv "openai-codex")
+if [[ "$CODEX_HARNESS_AUTH_MODE" != "api-key" ]]; then
+  while IFS= read -r auth_file; do
+    [[ -n "$auth_file" ]] || continue
+    AUTH_FILES+=("$auth_file")
+  done < <(openclaw_live_collect_auth_files_from_csv "openai-codex")
+fi
 
 AUTH_FILES_CSV=""
 if ((${#AUTH_FILES[@]} > 0)); then
@@ -81,8 +98,11 @@ export COREPACK_HOME="${COREPACK_HOME:-$XDG_CACHE_HOME/node/corepack}"
 export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-$XDG_CACHE_HOME/npm}"
 export npm_config_cache="$NPM_CONFIG_CACHE"
 # Force the Codex harness to use the staged `~/.codex` auth files. This lane
-# is not meant to exercise raw OpenAI API-key routing.
-unset OPENAI_API_KEY OPENAI_BASE_URL
+# is not meant to exercise raw OpenAI API-key routing unless the lane
+# explicitly opts into API-key auth for CI.
+if [ "${OPENCLAW_LIVE_CODEX_HARNESS_AUTH:-codex-auth}" != "api-key" ]; then
+  unset OPENAI_API_KEY OPENAI_BASE_URL
+fi
 mkdir -p "$NPM_CONFIG_PREFIX" "$XDG_CACHE_HOME" "$COREPACK_HOME" "$NPM_CONFIG_CACHE"
 chmod 700 "$XDG_CACHE_HOME" "$COREPACK_HOME" "$NPM_CONFIG_CACHE" || true
 export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
@@ -97,7 +117,7 @@ if ((${#auth_files[@]} > 0)); then
     fi
   done
 fi
-if [ ! -s "$HOME/.codex/auth.json" ]; then
+if [ "${OPENCLAW_LIVE_CODEX_HARNESS_AUTH:-codex-auth}" != "api-key" ] && [ ! -s "$HOME/.codex/auth.json" ]; then
   echo "ERROR: missing ~/.codex/auth.json for Codex harness live test." >&2
   exit 1
 fi
@@ -128,6 +148,7 @@ echo "==> Run Codex harness live test in Docker"
 echo "==> Model: ${OPENCLAW_LIVE_CODEX_HARNESS_MODEL:-codex/gpt-5.4}"
 echo "==> Image probe: ${OPENCLAW_LIVE_CODEX_HARNESS_IMAGE_PROBE:-1}"
 echo "==> MCP probe: ${OPENCLAW_LIVE_CODEX_HARNESS_MCP_PROBE:-1}"
+echo "==> Auth mode: $CODEX_HARNESS_AUTH_MODE"
 echo "==> Harness fallback: none"
 echo "==> Auth files: ${AUTH_FILES_CSV:-none}"
 docker run --rm -t \
@@ -139,11 +160,14 @@ docker run --rm -t \
   -e OPENCLAW_AGENT_HARNESS_FALLBACK=none \
   -e OPENCLAW_CODEX_APP_SERVER_BIN="${OPENCLAW_CODEX_APP_SERVER_BIN:-codex}" \
   -e OPENCLAW_DOCKER_AUTH_FILES_RESOLVED="$AUTH_FILES_CSV" \
+  -e OPENCLAW_LIVE_CODEX_HARNESS_AUTH="$CODEX_HARNESS_AUTH_MODE" \
   -e OPENCLAW_LIVE_CODEX_HARNESS=1 \
   -e OPENCLAW_LIVE_CODEX_HARNESS_DEBUG="${OPENCLAW_LIVE_CODEX_HARNESS_DEBUG:-}" \
   -e OPENCLAW_LIVE_CODEX_HARNESS_IMAGE_PROBE="${OPENCLAW_LIVE_CODEX_HARNESS_IMAGE_PROBE:-1}" \
   -e OPENCLAW_LIVE_CODEX_HARNESS_MCP_PROBE="${OPENCLAW_LIVE_CODEX_HARNESS_MCP_PROBE:-1}" \
   -e OPENCLAW_LIVE_CODEX_HARNESS_MODEL="${OPENCLAW_LIVE_CODEX_HARNESS_MODEL:-codex/gpt-5.4}" \
+  -e OPENAI_API_KEY \
+  -e OPENAI_BASE_URL \
   -e OPENCLAW_LIVE_TEST=1 \
   -e OPENCLAW_VITEST_FS_MODULE_CACHE=0 \
   "${DOCKER_HOME_MOUNT[@]}" \
