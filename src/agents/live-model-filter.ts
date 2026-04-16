@@ -25,7 +25,7 @@ const HIGH_SIGNAL_LIVE_MODEL_PRIORITY = [
 ] as const;
 
 export const DEFAULT_HIGH_SIGNAL_LIVE_MODEL_LIMIT = HIGH_SIGNAL_LIVE_MODEL_PRIORITY.length;
-const DEFAULT_HIGH_SIGNAL_LIVE_EXCLUDED_PROVIDERS = new Set(["codex"]);
+const DEFAULT_HIGH_SIGNAL_LIVE_EXCLUDED_PROVIDERS = new Set(["codex", "codex-cli", "openai-codex"]);
 
 const HIGH_SIGNAL_LIVE_MODEL_PRIORITY_INDEX = new Map<string, number>(
   HIGH_SIGNAL_LIVE_MODEL_PRIORITY.map((key, index) => [key, index]),

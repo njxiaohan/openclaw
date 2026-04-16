@@ -10,6 +10,20 @@ describe("shouldExcludeProviderFromDefaultHighSignalLiveSweep", () => {
         providerFilter: null,
       }),
     ).toBe(true);
+    expect(
+      shouldExcludeProviderFromDefaultHighSignalLiveSweep({
+        provider: "openai-codex",
+        useExplicitModels: false,
+        providerFilter: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldExcludeProviderFromDefaultHighSignalLiveSweep({
+        provider: "codex-cli",
+        useExplicitModels: false,
+        providerFilter: null,
+      }),
+    ).toBe(true);
   });
 
   it("keeps dedicated harness providers when explicitly requested by provider filter", () => {

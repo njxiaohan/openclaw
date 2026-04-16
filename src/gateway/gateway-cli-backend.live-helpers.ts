@@ -32,9 +32,9 @@ import { extractPayloadText } from "./test-helpers.agent-results.js";
 // Aggregate docker live runs can contend on startup enough that the gateway
 // websocket handshake needs a wider budget than the single-provider reruns.
 const CLI_GATEWAY_CONNECT_TIMEOUT_MS = 60_000;
-const CLI_CRON_MCP_PROBE_MAX_ATTEMPTS = 3;
-const CLI_CRON_MCP_PROBE_VERIFY_POLLS = 4;
-const CLI_CRON_MCP_PROBE_VERIFY_POLL_MS = 1_500;
+const CLI_CRON_MCP_PROBE_MAX_ATTEMPTS = 4;
+const CLI_CRON_MCP_PROBE_VERIFY_POLLS = 8;
+const CLI_CRON_MCP_PROBE_VERIFY_POLL_MS = 2_000;
 
 export type BootstrapWorkspaceContext = {
   expectedInjectedFiles: string[];
