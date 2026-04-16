@@ -1,5 +1,7 @@
 import {
   preflightWebLoginWithQrStart as preflightWebLoginWithQrStartImpl,
+  readExistingWebLoginWithQrResult as readExistingWebLoginWithQrResultImpl,
+  startWebLoginWithQrAfterPreflight as startWebLoginWithQrAfterPreflightImpl,
   startWebLoginWithQr as startWebLoginWithQrImpl,
   waitForWebLogin as waitForWebLoginImpl,
 } from "../login-qr-runtime.js";
@@ -30,6 +32,10 @@ type WebAuthExists = typeof import("./auth-store.js").webAuthExists;
 type LoginWeb = typeof import("./login.js").loginWeb;
 type PreflightWebLoginWithQrStart =
   typeof import("../login-qr-runtime.js").preflightWebLoginWithQrStart;
+type ReadExistingWebLoginWithQrResult =
+  typeof import("../login-qr-runtime.js").readExistingWebLoginWithQrResult;
+type StartWebLoginWithQrAfterPreflight =
+  typeof import("../login-qr-runtime.js").startWebLoginWithQrAfterPreflight;
 type StartWebLoginWithQr = typeof import("../login-qr-runtime.js").startWebLoginWithQr;
 type WaitForWebLogin = typeof import("../login-qr-runtime.js").waitForWebLogin;
 type WhatsAppSetupWizard = typeof import("./setup-surface.js").whatsappSetupWizard;
@@ -89,10 +95,22 @@ export async function preflightWebLoginWithQrStart(
   return await preflightWebLoginWithQrStartImpl(...args);
 }
 
+export async function readExistingWebLoginWithQrResult(
+  ...args: Parameters<ReadExistingWebLoginWithQrResult>
+): Promise<Awaited<ReturnType<ReadExistingWebLoginWithQrResult>>> {
+  return await readExistingWebLoginWithQrResultImpl(...args);
+}
+
 export async function startWebLoginWithQr(
   ...args: Parameters<StartWebLoginWithQr>
 ): ReturnType<StartWebLoginWithQr> {
   return await startWebLoginWithQrImpl(...args);
+}
+
+export async function startWebLoginWithQrAfterPreflight(
+  ...args: Parameters<StartWebLoginWithQrAfterPreflight>
+): ReturnType<StartWebLoginWithQrAfterPreflight> {
+  return await startWebLoginWithQrAfterPreflightImpl(...args);
 }
 
 export async function waitForWebLogin(

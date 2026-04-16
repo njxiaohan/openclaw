@@ -337,6 +337,12 @@ export type ChannelGatewayAdapter<ResolvedAccount = unknown> = {
   startAccount?: (ctx: ChannelGatewayContext<ResolvedAccount>) => Promise<unknown>;
   stopAccount?: (ctx: ChannelGatewayContext<ResolvedAccount>) => Promise<void>;
   resolveGatewayAuthBypassPaths?: (params: { cfg: OpenClawConfig }) => string[];
+  loginWithQrStartExisting?: (params: {
+    accountId?: string;
+    force?: boolean;
+    timeoutMs?: number;
+    verbose?: boolean;
+  }) => Promise<ChannelLoginWithQrStartResult | null>;
   loginWithQrStartPreflight?: (params: {
     accountId?: string;
     force?: boolean;

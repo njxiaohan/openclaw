@@ -71,6 +71,25 @@ function isLoginFresh(login: ActiveLogin) {
   return Date.now() - login.startedAt < ACTIVE_LOGIN_TTL_MS;
 }
 
+function readActiveQrResult(accountId: string): StartWebLoginWithQrResult | null {
+  const existing = activeLogins.get(accountId);
+  if (!existing || !isLoginFresh(existing) || !existing.qrDataUrl) {
+    return null;
+  }
+  return {
+    qrDataUrl: existing.qrDataUrl,
+    message: "QR already active. Scan it in WhatsApp → Linked Devices.",
+  };
+}
+
+export function readExistingWebLoginWithQrResult(
+  opts: Pick<WebLoginStartParams, "accountId"> = {},
+): StartWebLoginWithQrResult | null {
+  const cfg = loadConfig();
+  const account = resolveWhatsAppAccount({ cfg, accountId: opts.accountId });
+  return readActiveQrResult(account.accountId);
+}
+
 function attachLoginWaiter(accountId: string, login: ActiveLogin) {
   login.waitPromise = waitForWhatsAppLoginResult({
     sock: login.sock,
@@ -114,19 +133,26 @@ function attachLoginWaiter(accountId: string, login: ActiveLogin) {
 export async function startWebLoginWithQr(
   opts: WebLoginStartParams = {},
 ): Promise<StartWebLoginWithQrResult> {
+  const activeQr = readExistingWebLoginWithQrResult(opts);
+  if (activeQr) {
+    return activeQr;
+  }
   const preflight = await preflightWebLoginWithQrStart(opts);
   if (preflight) {
     return preflight;
   }
+  return await startWebLoginWithQrAfterPreflight(opts);
+}
+
+export async function startWebLoginWithQrAfterPreflight(
+  opts: WebLoginStartParams = {},
+): Promise<StartWebLoginWithQrResult> {
   const runtime = opts.runtime ?? defaultRuntime;
   const cfg = loadConfig();
   const account = resolveWhatsAppAccount({ cfg, accountId: opts.accountId });
-  const existing = activeLogins.get(account.accountId);
-  if (existing && isLoginFresh(existing) && existing.qrDataUrl) {
-    return {
-      qrDataUrl: existing.qrDataUrl,
-      message: "QR already active. Scan it in WhatsApp → Linked Devices.",
-    };
+  const activeQr = readActiveQrResult(account.accountId);
+  if (activeQr) {
+    return activeQr;
   }
 
   await resetActiveLogin(account.accountId);
