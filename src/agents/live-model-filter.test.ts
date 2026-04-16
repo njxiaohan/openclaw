@@ -34,6 +34,13 @@ describe("shouldExcludeProviderFromDefaultHighSignalLiveSweep", () => {
         providerFilter: new Set(["codex"]),
       }),
     ).toBe(false);
+    expect(
+      shouldExcludeProviderFromDefaultHighSignalLiveSweep({
+        provider: "openai-codex",
+        useExplicitModels: false,
+        providerFilter: new Set(["codex-cli"]),
+      }),
+    ).toBe(false);
   });
 
   it("keeps dedicated harness providers when the caller uses explicit model selection", () => {

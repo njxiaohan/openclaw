@@ -176,11 +176,9 @@ function sleep(ms: number): Promise<void> {
 
 export function shouldRetryCliCronMcpProbeReply(text: string): boolean {
   const normalized = normalizeLowercaseStringOrEmpty(text);
-  return (
-    normalized.includes("cron tool call was cancelled") ||
-    normalized.includes("job was not created") ||
-    normalized.includes("tool call was canceled")
-  );
+  const mentionsCancellation =
+    normalized.includes("tool call was cancelled") || normalized.includes("tool call was canceled");
+  return mentionsCancellation && normalized.includes("job was not created");
 }
 
 export async function connectTestGatewayClient(params: {

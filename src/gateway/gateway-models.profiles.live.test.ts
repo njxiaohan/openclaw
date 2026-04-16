@@ -2059,6 +2059,8 @@ describeLive("gateway live (dev agent, profile keys)", () => {
                   provider: m.provider,
                   useExplicitModels: useExplicit,
                   providerFilter: PROVIDERS,
+                  config: cfg,
+                  env: process.env,
                 }) && isHighSignalLiveModelRef({ provider: m.provider, id: m.id }),
             );
 
