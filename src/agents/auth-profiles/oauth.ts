@@ -203,10 +203,10 @@ function adoptNewerMainOAuthCredential(params: {
       Number.isFinite(mainCred.expires) &&
       (!Number.isFinite(params.cred.expires) || mainCred.expires > params.cred.expires) &&
       // Defense-in-depth against cross-account leaks: refuse on positive
-      // identity mismatch, but tolerate the upgrade case where the sub
-      // has no identity metadata yet (pre-capture) and main does.
-      // Strict symmetry is reserved for the mirror direction.
-      isOAuthIdentityCompatible(params.cred, mainCred)
+      // mismatch, identity regression, or non-overlapping-field
+      // credentials. Tolerates the pure upgrade case where the sub has
+      // no identity metadata yet and main does.
+      isSafeToCopyOAuthIdentity(params.cred, mainCred)
     ) {
       params.store.profiles[params.profileId] = { ...mainCred };
       saveAuthProfileStore(params.store, params.agentDir);
@@ -243,10 +243,25 @@ function refreshQueueKey(provider: string, profileId: string): string {
 }
 
 /**
- * Wrap an async call with a hard timeout, rejecting the promise if the
- * underlying work exceeds the deadline. Used on the OAuth refresh critical
- * section so the in-flight lock is always released well before
- * OAUTH_REFRESH_LOCK_OPTIONS.stale would let a peer reclaim it.
+ * Wrap an async call with a deadline after which the caller sees a
+ * timeout rejection and releases its locks. Used on the OAuth refresh
+ * critical section so the in-flight lock cannot outlive
+ * OAUTH_REFRESH_LOCK_OPTIONS.stale.
+ *
+ * LIMITATION: this does NOT cancel the underlying work. JavaScript
+ * promises are not cancellable and the pi-ai OAuth stack does not
+ * currently accept an AbortSignal. When the deadline fires the caller
+ * moves on and releases its file lock, but the original `fn()` promise
+ * keeps running in the background. That means a slow upstream refresh
+ * could still burn a refresh token well after we have given up on it,
+ * and a waiting peer that has now taken the lock may hit
+ * `refresh_token_reused`.
+ *
+ * The existing `isRefreshTokenReusedError` recovery path is the backstop
+ * for that residual case — it reloads from the main store and adopts if
+ * another agent's refresh has since landed. A fuller fix requires
+ * plumbing `AbortSignal` through the refresh stack into the HTTP
+ * client; tracked as a follow-up.
  */
 async function withRefreshCallTimeout<T>(
   label: string,
@@ -389,78 +404,70 @@ export function isSameOAuthIdentity(
 }
 
 /**
- * Relaxed identity compatibility check, used for credential ADOPTION
- * (main -> sub) — refuses only when both sides expose identity AND it
- * positively mismatches. Tolerates the upgrade case where a sub-agent's
- * older credential predates accountId/email capture but the main
- * credential it would adopt has identity metadata.
+ * Identity gate used for both directions of credential copy:
+ *   - mirror (sub-agent refresh -> main agent store)
+ *   - adopt (main agent store -> sub-agent store)
  *
- * Mirror writes (sub -> main, the credential-poisoning direction) still
- * use the strict `isSameOAuthIdentity`; this relaxed form is strictly
- * for the direction where main is the authoritative source.
+ * Rule: allow the copy iff
+ *   1. no positive identity mismatch — if both sides expose the same
+ *      identity field (accountId or email), the values must match, AND
+ *   2. the incoming credential carries at least as much identity
+ *      evidence as the existing one — if existing has accountId/email,
+ *      incoming must carry the same field, AND
+ *   3. when both sides carry identity but in non-overlapping fields
+ *      (existing has only accountId, incoming has only email, or vice
+ *      versa) we cannot positively prove the same account and the copy
+ *      is refused.
  *
- * Design note: this is deliberately weaker than `isSameOAuthIdentity` so
- * that fresh-install installations that pre-date accountId capture can
- * still benefit from the #26322 coordination fix. It is still strict
- * enough to block the CWE-284 cross-account-leak scenario
- * (`accountId(main)` != `accountId(sub)`), because that case trips the
- * positive-mismatch branch.
+ * Accepts:
+ *   - matching accountId (positive match on strongest field)
+ *   - matching email when accountId is absent on both sides
+ *   - neither side carries identity (no evidence of mismatch)
+ *   - existing has no identity, incoming has identity (UPGRADE: adds
+ *     the marker without dropping anything)
+ *
+ * Refuses:
+ *   - mismatching accountId or email on a shared field (CWE-284 core)
+ *   - incoming drops an identity field present on existing (regression
+ *     that would later let a wrong-account peer pass this gate)
+ *   - non-overlapping fields (no comparable positive match)
+ *
+ * Design note: this is a single unified rule for both copy directions.
+ * The rule is deliberately one-sided because "existing" is whatever is
+ * about to be overwritten and "incoming" is the new data — the
+ * constraint is the same regardless of whether existing is main or sub.
  */
-export function isOAuthIdentityCompatible(
+export function isSafeToCopyOAuthIdentity(
   existing: Pick<OAuthCredential, "accountId" | "email">,
   incoming: Pick<OAuthCredential, "accountId" | "email">,
 ): boolean {
   const aAcct = normalizeAuthIdentityToken(existing.accountId);
   const bAcct = normalizeAuthIdentityToken(incoming.accountId);
+  const aEmail = normalizeAuthEmailToken(existing.email);
+  const bEmail = normalizeAuthEmailToken(incoming.email);
+
+  // (1) Positive match on a shared field, if one exists.
   if (aAcct !== undefined && bAcct !== undefined) {
     return aAcct === bAcct;
   }
-  const aEmail = normalizeAuthEmailToken(existing.email);
-  const bEmail = normalizeAuthEmailToken(incoming.email);
   if (aEmail !== undefined && bEmail !== undefined) {
     return aEmail === bEmail;
   }
-  // No shared comparable field — no positive mismatch evidence.
-  // Adoption is safe under the main-as-authoritative assumption.
-  return true;
-}
 
-/**
- * Identity gate used for the mirror direction (sub -> main). Strictly
- * between `isSameOAuthIdentity` (too strict: refuses legitimate identity
- * upgrades) and `isOAuthIdentityCompatible` (too loose: allows identity
- * loss which later enables cross-account adoption).
- *
- * Rule: allow the mirror iff
- *   1. there is no positive identity mismatch (same test as the relaxed
- *      adoption gate), AND
- *   2. the incoming credential carries at least as much identity
- *      evidence as the existing one — i.e. if existing has
- *      accountId/email, incoming must carry the same field.
- *
- * Rationale for (2): dropping an identity field on the main credential
- * would defeat future adoption-gate checks from other agents that
- * authenticate as different accounts. With main now identity-less, a
- * wrong-account sub could pass the relaxed adopt check and inherit a
- * credential that does not belong to it.
- */
-export function isSafeToMirrorOAuthIdentity(
-  existing: Pick<OAuthCredential, "accountId" | "email">,
-  incoming: Pick<OAuthCredential, "accountId" | "email">,
-): boolean {
-  if (!isOAuthIdentityCompatible(existing, incoming)) {
+  // No shared comparable field beyond this point.
+  const aHasIdentity = aAcct !== undefined || aEmail !== undefined;
+
+  // (2) Refuse if existing has any identity evidence that incoming lacks.
+  //     That covers both the "drop" case (incoming has nothing) and the
+  //     "non-overlapping fields" case (existing has accountId only,
+  //     incoming has email only, or vice versa).
+  if (aHasIdentity) {
     return false;
   }
-  const aAcct = normalizeAuthIdentityToken(existing.accountId);
-  const bAcct = normalizeAuthIdentityToken(incoming.accountId);
-  if (aAcct !== undefined && bAcct === undefined) {
-    return false;
-  }
-  const aEmail = normalizeAuthEmailToken(existing.email);
-  const bEmail = normalizeAuthEmailToken(incoming.email);
-  if (aEmail !== undefined && bEmail === undefined) {
-    return false;
-  }
+
+  // (3) Existing has no identity. Either incoming has none either
+  //     (allowed: no evidence of mismatch) or incoming adds identity
+  //     (allowed: pure upgrade, no loss).
   return true;
 }
 
@@ -481,14 +488,11 @@ async function mirrorRefreshedCredentialIntoMainStore(params: {
         if (existing && existing.provider !== params.refreshed.provider) {
           return false;
         }
-        // Identity binding for the mirror direction. Uses
-        // isSafeToMirrorOAuthIdentity (rather than isSameOAuthIdentity)
-        // so that legitimate identity upgrades are allowed (main has no
-        // accountId yet, incoming does — common in upgrade states) while
-        // still refusing positive mismatches AND identity regressions
-        // (main has accountId but incoming doesn't — would open a
-        // cross-account adoption vector for future peers).
-        if (existing && !isSafeToMirrorOAuthIdentity(existing, params.refreshed)) {
+        // Identity binding for the mirror direction, using the unified
+        // copy-safety gate. Accepts upgrades (main has no accountId yet,
+        // incoming does) while refusing positive mismatches, identity
+        // regressions, and non-overlapping-field credentials.
+        if (existing && !isSafeToCopyOAuthIdentity(existing, params.refreshed)) {
           log.warn("refused to mirror OAuth credential: identity mismatch or regression", {
             profileId: params.profileId,
           });
@@ -574,10 +578,10 @@ async function doRefreshOAuthTokenWithLock(params: {
             mainCred.provider === cred.provider &&
             Number.isFinite(mainCred.expires) &&
             Date.now() < mainCred.expires &&
-            // Defense-in-depth identity gate — relaxed variant: refuse only
-            // on positive mismatch. Upgrade tolerance for credentials that
-            // predate accountId/email capture.
-            isOAuthIdentityCompatible(cred, mainCred)
+            // Defense-in-depth identity gate. Tolerates the pure upgrade
+            // case (sub predates identity capture) but refuses positive
+            // mismatch, identity regression, and non-overlapping fields.
+            isSafeToCopyOAuthIdentity(cred, mainCred)
           ) {
             store.profiles[params.profileId] = { ...mainCred };
             saveAuthProfileStore(store, params.agentDir);
@@ -595,7 +599,7 @@ async function doRefreshOAuthTokenWithLock(params: {
             mainCred.provider === cred.provider &&
             Number.isFinite(mainCred.expires) &&
             Date.now() < mainCred.expires &&
-            !isOAuthIdentityCompatible(cred, mainCred)
+            !isSafeToCopyOAuthIdentity(cred, mainCred)
           ) {
             // Main has fresh creds but they belong to a DIFFERENT account —
             // record the refusal so operators can diagnose, then proceed to
@@ -1026,9 +1030,9 @@ export async function resolveApiKeyForProfile(
           mainCred.provider === cred.provider &&
           Date.now() < mainCred.expires &&
           // Defense-in-depth identity gate — refuse to inherit credentials
-          // from a different account even under refresh failure. Relaxed
-          // variant tolerates pre-capture credentials.
-          isOAuthIdentityCompatible(cred, mainCred)
+          // from a different account even under refresh failure. Tolerates
+          // pre-capture credentials but refuses regression/non-overlap.
+          isSafeToCopyOAuthIdentity(cred, mainCred)
         ) {
           // Main agent has fresh credentials - copy them to this agent and use them
           refreshedStore.profiles[profileId] = { ...mainCred };

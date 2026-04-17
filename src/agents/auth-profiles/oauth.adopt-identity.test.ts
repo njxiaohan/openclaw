@@ -341,6 +341,184 @@ describe("OAuth credential adoption is identity-gated", () => {
     expect(result?.apiKey).toBe("main-fresh-access");
   });
 
+  it("adoptNewerMainOAuthCredential refuses non-overlapping identity fields (sub has accountId, main has email)", async () => {
+    // Reviewer-requested: with no COMPARABLE shared identity field there
+    // is no positive-match evidence, so adoption must refuse.
+    const profileId = "openai-codex:default";
+    const provider = "openai-codex";
+    const subExpiry = Date.now() + 10 * 60 * 1000;
+    const mainFresher = Date.now() + 60 * 60 * 1000;
+
+    const subAgentDir = path.join(tempRoot, "agents", "sub-nonoverlap-pre", "agent");
+    await fs.mkdir(subAgentDir, { recursive: true });
+    saveAuthProfileStore(
+      storeWith(
+        profileId,
+        oauthCred({
+          provider,
+          access: "sub-own-access",
+          refresh: "sub-own-refresh",
+          expires: subExpiry,
+          accountId: "acct-sub",
+          // NO email on sub
+        }),
+      ),
+      subAgentDir,
+    );
+    saveAuthProfileStore(
+      storeWith(
+        profileId,
+        oauthCred({
+          provider,
+          access: "main-fresher-access",
+          refresh: "main-fresher-refresh",
+          expires: mainFresher,
+          email: "main@example.com",
+          // NO accountId on main
+        }),
+      ),
+      mainAgentDir,
+    );
+
+    const result = await resolveApiKeyForProfile({
+      store: ensureAuthProfileStore(subAgentDir),
+      profileId,
+      agentDir: subAgentDir,
+    });
+
+    // Sub must keep its own credential; pre-refresh adopt is refused.
+    expect(result?.apiKey).toBe("sub-own-access");
+
+    const subRaw = JSON.parse(
+      await fs.readFile(path.join(subAgentDir, "auth-profiles.json"), "utf8"),
+    ) as AuthProfileStore;
+    expect(subRaw.profiles[profileId]).toMatchObject({
+      access: "sub-own-access",
+      accountId: "acct-sub",
+    });
+  });
+
+  it("inside-the-lock adopt refuses non-overlapping identity fields (sub has accountId, main has email)", async () => {
+    const profileId = "openai-codex:default";
+    const provider = "openai-codex";
+    const freshExpiry = Date.now() + 60 * 60 * 1000;
+
+    const subAgentDir = path.join(tempRoot, "agents", "sub-nonoverlap-inside", "agent");
+    await fs.mkdir(subAgentDir, { recursive: true });
+    saveAuthProfileStore(
+      storeWith(
+        profileId,
+        oauthCred({
+          provider,
+          access: "sub-stale-access",
+          refresh: "sub-refresh-token",
+          expires: Date.now() - 60_000,
+          accountId: "acct-sub",
+        }),
+      ),
+      subAgentDir,
+    );
+    saveAuthProfileStore(
+      storeWith(
+        profileId,
+        oauthCred({
+          provider,
+          access: "main-fresh-access",
+          refresh: "main-fresh-refresh",
+          expires: freshExpiry,
+          email: "main@example.com",
+        }),
+      ),
+      mainAgentDir,
+    );
+
+    refreshProviderOAuthCredentialWithPluginMock.mockImplementationOnce(
+      async () =>
+        ({
+          type: "oauth",
+          provider,
+          access: "sub-refreshed-access",
+          refresh: "sub-refreshed-refresh",
+          expires: freshExpiry,
+          accountId: "acct-sub",
+        }) as never,
+    );
+
+    const result = await resolveApiKeyForProfile({
+      store: ensureAuthProfileStore(subAgentDir),
+      profileId,
+      agentDir: subAgentDir,
+    });
+
+    // Sub performed its own refresh rather than adopting main's email-only cred.
+    expect(refreshProviderOAuthCredentialWithPluginMock).toHaveBeenCalledTimes(1);
+    expect(result?.apiKey).toBe("sub-refreshed-access");
+  });
+
+  it("catch-block main-inherit refuses non-overlapping identity fields", async () => {
+    const profileId = "openai-codex:default";
+    const provider = "openai-codex";
+    const freshExpiry = Date.now() + 60 * 60 * 1000;
+
+    const subAgentDir = path.join(tempRoot, "agents", "sub-nonoverlap-catch", "agent");
+    await fs.mkdir(subAgentDir, { recursive: true });
+    saveAuthProfileStore(
+      storeWith(
+        profileId,
+        oauthCred({
+          provider,
+          access: "sub-stale-access",
+          refresh: "sub-refresh-token",
+          expires: Date.now() - 60_000,
+          accountId: "acct-sub",
+        }),
+      ),
+      subAgentDir,
+    );
+    saveAuthProfileStore(
+      storeWith(
+        profileId,
+        oauthCred({
+          provider,
+          access: "main-stale-access",
+          refresh: "main-stale-refresh",
+          expires: Date.now() - 60_000,
+          email: "main@example.com",
+        }),
+      ),
+      mainAgentDir,
+    );
+
+    refreshProviderOAuthCredentialWithPluginMock.mockImplementationOnce(async () => {
+      // Another process writes a fresh email-only cred into main while
+      // our refresh is in-flight, then we throw a generic upstream error.
+      saveAuthProfileStore(
+        storeWith(
+          profileId,
+          oauthCred({
+            provider,
+            access: "main-refreshed-access",
+            refresh: "main-refreshed-refresh",
+            expires: freshExpiry,
+            email: "main@example.com",
+          }),
+        ),
+        mainAgentDir,
+      );
+      throw new Error("upstream 503 service unavailable");
+    });
+
+    // Catch-block main-inherit must refuse the non-overlapping cred and
+    // propagate the original error rather than leaking main's credential.
+    await expect(
+      resolveApiKeyForProfile({
+        store: ensureAuthProfileStore(subAgentDir),
+        profileId,
+        agentDir: subAgentDir,
+      }),
+    ).rejects.toThrow(/OAuth token refresh failed for openai-codex/);
+  });
+
   it("catch-block main-inherit tolerates sub-no-identity / main-has-identity (upgrade case)", async () => {
     // Upgrade scenario hitting the catch-block fallback: sub refresh
     // throws, main later carries fresh cred with identity. Sub must

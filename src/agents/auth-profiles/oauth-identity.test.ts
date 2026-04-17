@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  isOAuthIdentityCompatible,
-  isSafeToMirrorOAuthIdentity,
+  isSafeToCopyOAuthIdentity,
   isSameOAuthIdentity,
   normalizeAuthEmailToken,
   normalizeAuthIdentityToken,
@@ -200,59 +199,70 @@ function maybe<T>(rng: () => number, value: T): T | undefined {
   return rng() < 0.5 ? value : undefined;
 }
 
-describe("isOAuthIdentityCompatible (relaxed rule, used for adoption)", () => {
+describe("isSafeToCopyOAuthIdentity (unified copy gate, used for mirror and adopt)", () => {
   describe("positive matches", () => {
     it("accepts matching accountIds", () => {
-      expect(isOAuthIdentityCompatible({ accountId: "x" }, { accountId: "x" })).toBe(true);
+      expect(isSafeToCopyOAuthIdentity({ accountId: "x" }, { accountId: "x" })).toBe(true);
     });
 
     it("accepts matching emails (case-insensitive)", () => {
       expect(
-        isOAuthIdentityCompatible({ email: "u@example.com" }, { email: "U@Example.com" }),
+        isSafeToCopyOAuthIdentity({ email: "u@example.com" }, { email: "U@Example.com" }),
       ).toBe(true);
     });
 
     it("accepts when both sides expose identical identity across accountId + email", () => {
       expect(
-        isOAuthIdentityCompatible(
+        isSafeToCopyOAuthIdentity(
           { accountId: "x", email: "u@example.com" },
           { accountId: "x", email: "u@example.com" },
         ),
       ).toBe(true);
     });
-
-    it("accepts when one side has accountId and the other has only email (no shared positive-mismatch field)", () => {
-      // Relaxed rule: with no COMPARABLE shared field there is no positive
-      // evidence of mismatch, so adoption is allowed. This is the case the
-      // strict rule refuses.
-      expect(isOAuthIdentityCompatible({ accountId: "x" }, { email: "u@example.com" })).toBe(true);
-    });
   });
 
   describe("upgrade tolerance (primary motivator)", () => {
-    it("accepts sub-with-no-identity adopting main-with-accountId", () => {
-      // The #26322 upgrade case: sub cred predates accountId capture,
-      // main has it. Must allow or the fix regresses on existing installs.
-      expect(isOAuthIdentityCompatible({}, { accountId: "x" })).toBe(true);
+    it("accepts existing-no-identity adopting incoming-with-accountId", () => {
+      // The #26322 upgrade case: existing cred predates accountId capture,
+      // incoming has it. Must allow or the fix regresses on existing installs.
+      expect(isSafeToCopyOAuthIdentity({}, { accountId: "x" })).toBe(true);
     });
 
-    it("accepts sub-with-no-identity adopting main-with-email", () => {
-      expect(isOAuthIdentityCompatible({}, { email: "u@example.com" })).toBe(true);
-    });
-
-    it("accepts main-with-no-identity (unlikely but symmetric)", () => {
-      expect(isOAuthIdentityCompatible({ accountId: "x" }, {})).toBe(true);
+    it("accepts existing-no-identity adopting incoming-with-email", () => {
+      expect(isSafeToCopyOAuthIdentity({}, { email: "u@example.com" })).toBe(true);
     });
 
     it("accepts when both sides lack identity metadata", () => {
-      expect(isOAuthIdentityCompatible({}, {})).toBe(true);
+      expect(isSafeToCopyOAuthIdentity({}, {})).toBe(true);
+    });
+  });
+
+  describe("identity regression is refused (incoming drops existing's identity)", () => {
+    it("refuses when incoming has no identity and existing has accountId", () => {
+      // Was previously allowed under the permissive relaxed rule; the
+      // narrower rule refuses because it would strip identity evidence.
+      expect(isSafeToCopyOAuthIdentity({ accountId: "x" }, {})).toBe(false);
+    });
+
+    it("refuses when incoming has no identity and existing has email", () => {
+      expect(isSafeToCopyOAuthIdentity({ email: "u@example.com" }, {})).toBe(false);
+    });
+  });
+
+  describe("non-overlapping identity fields are refused", () => {
+    it("refuses when existing has only accountId and incoming has only email", () => {
+      expect(isSafeToCopyOAuthIdentity({ accountId: "x" }, { email: "u@example.com" })).toBe(false);
+    });
+
+    it("refuses when existing has only email and incoming has only accountId", () => {
+      expect(isSafeToCopyOAuthIdentity({ email: "u@example.com" }, { accountId: "x" })).toBe(false);
     });
   });
 
   describe("positive mismatch still refuses (CWE-284 protection)", () => {
     it("refuses mismatching accountIds even when emails match", () => {
       expect(
-        isOAuthIdentityCompatible(
+        isSafeToCopyOAuthIdentity(
           { accountId: "a", email: "u@example.com" },
           { accountId: "b", email: "u@example.com" },
         ),
@@ -261,50 +271,64 @@ describe("isOAuthIdentityCompatible (relaxed rule, used for adoption)", () => {
 
     it("refuses mismatching emails when both sides expose only email", () => {
       expect(
-        isOAuthIdentityCompatible({ email: "a@example.com" }, { email: "b@example.com" }),
+        isSafeToCopyOAuthIdentity({ email: "a@example.com" }, { email: "b@example.com" }),
       ).toBe(false);
     });
 
     it("accountId is case-sensitive", () => {
-      expect(isOAuthIdentityCompatible({ accountId: "X" }, { accountId: "x" })).toBe(false);
+      expect(isSafeToCopyOAuthIdentity({ accountId: "X" }, { accountId: "x" })).toBe(false);
     });
   });
 
   describe("normalization", () => {
     it("ignores surrounding whitespace on accountId", () => {
-      expect(isOAuthIdentityCompatible({ accountId: "  acct-1  " }, { accountId: "acct-1" })).toBe(
+      expect(isSafeToCopyOAuthIdentity({ accountId: "  acct-1  " }, { accountId: "acct-1" })).toBe(
         true,
       );
     });
 
     it("ignores email case and whitespace", () => {
       expect(
-        isOAuthIdentityCompatible({ email: "  U@Example.com  " }, { email: "u@example.com" }),
+        isSafeToCopyOAuthIdentity({ email: "  U@Example.com  " }, { email: "u@example.com" }),
       ).toBe(true);
     });
 
-    it("treats empty/whitespace-only identity as absent (allowed to adopt)", () => {
+    it("treats empty/whitespace-only identity as absent (allowed to upgrade)", () => {
       expect(
-        isOAuthIdentityCompatible({ accountId: "   ", email: "" }, { accountId: "acct-main" }),
+        isSafeToCopyOAuthIdentity({ accountId: "   ", email: "" }, { accountId: "acct-main" }),
       ).toBe(true);
     });
   });
 
-  describe("reflexivity and symmetry", () => {
+  describe("reflexivity", () => {
     it("is reflexive", () => {
       const a = { accountId: "acct-1", email: "u@example.com" };
-      expect(isOAuthIdentityCompatible(a, a)).toBe(true);
+      expect(isSafeToCopyOAuthIdentity(a, a)).toBe(true);
+    });
+  });
+
+  describe("relationship to the strict isSameOAuthIdentity reference", () => {
+    it("is at least as permissive as the strict rule (strict implies safe-to-copy)", () => {
+      // Pure-symmetric match cases accepted by the strict rule must also
+      // be accepted by the unified copy gate.
+      expect(isSameOAuthIdentity({ accountId: "x" }, { accountId: "x" })).toBe(true);
+      expect(isSafeToCopyOAuthIdentity({ accountId: "x" }, { accountId: "x" })).toBe(true);
     });
 
-    it("is symmetric", () => {
-      const a = { accountId: "acct-1" };
-      const b = { accountId: "acct-2" };
-      expect(isOAuthIdentityCompatible(a, b)).toBe(isOAuthIdentityCompatible(b, a));
+    it("only relaxes the strict rule in the pure-upgrade direction", () => {
+      // Existing has no identity, incoming has identity: strict refuses,
+      // unified accepts.
+      expect(isSameOAuthIdentity({}, { accountId: "x" })).toBe(false);
+      expect(isSafeToCopyOAuthIdentity({}, { accountId: "x" })).toBe(true);
+    });
+
+    it("does NOT relax in the regression direction (strict and unified both refuse)", () => {
+      expect(isSameOAuthIdentity({ accountId: "x" }, {})).toBe(false);
+      expect(isSafeToCopyOAuthIdentity({ accountId: "x" }, {})).toBe(false);
     });
   });
 });
-
-describe("isOAuthIdentityCompatible fuzz", () => {
+describe("isSafeToCopyOAuthIdentity fuzz", () => {
   function makeSeededRandom(seed: number): () => number {
     let t = seed >>> 0;
     return () => {
@@ -329,47 +353,28 @@ describe("isOAuthIdentityCompatible fuzz", () => {
     return rng() < 0.5 ? value : undefined;
   }
 
-  it("is always symmetric", () => {
-    const rng = makeSeededRandom(0x17_00_00_17);
+  it("is reflexive: share(a, a) is always true", () => {
+    const rng = makeSeededRandom(0x0172_0417);
     for (let i = 0; i < 1000; i += 1) {
       const a = {
         accountId: maybe(rng, randomString(rng, 64)),
         email: maybe(rng, randomString(rng, 64)),
       };
-      const b = {
-        accountId: maybe(rng, randomString(rng, 64)),
-        email: maybe(rng, randomString(rng, 64)),
-      };
-      expect(isOAuthIdentityCompatible(a, b)).toBe(isOAuthIdentityCompatible(b, a));
+      expect(isSafeToCopyOAuthIdentity(a, a)).toBe(true);
     }
   });
 
-  it("is always reflexive", () => {
-    const rng = makeSeededRandom(0xdeadbeef);
-    for (let i = 0; i < 1000; i += 1) {
-      const a = {
-        accountId: maybe(rng, randomString(rng, 64)),
-        email: maybe(rng, randomString(rng, 64)),
-      };
-      expect(isOAuthIdentityCompatible(a, a)).toBe(true);
-    }
-  });
-
-  it("always refuses distinct non-empty accountIds regardless of email", () => {
+  it("always refuses distinct non-empty accountIds (primary CWE-284 invariant)", () => {
     const rng = makeSeededRandom(0xfaceb00c);
     for (let i = 0; i < 500; i += 1) {
       const idA = `A-${randomString(rng, 32) || "x"}`;
       const idB = `B-${randomString(rng, 32) || "y"}`;
-      const email = `${randomString(rng, 16) || "u"}@example.com`;
-      expect(isOAuthIdentityCompatible({ accountId: idA, email }, { accountId: idB, email })).toBe(
-        false,
-      );
+      expect(isSafeToCopyOAuthIdentity({ accountId: idA }, { accountId: idB })).toBe(false);
     }
   });
 
-  it("is at least as permissive as isSameOAuthIdentity (relaxed is weaker)", () => {
-    // Property: if the strict rule accepts, the relaxed rule must also
-    // accept. Never the other way around. Fuzz over random input pairs.
+  it("strict → unified: if isSameOAuthIdentity accepts, isSafeToCopyOAuthIdentity accepts", () => {
+    // Monotonic relaxation property over random inputs.
     const rng = makeSeededRandom(0x7777_7777);
     for (let i = 0; i < 1000; i += 1) {
       const a = {
@@ -381,92 +386,28 @@ describe("isOAuthIdentityCompatible fuzz", () => {
         email: maybe(rng, randomString(rng, 32)),
       };
       if (isSameOAuthIdentity(a, b)) {
-        expect(isOAuthIdentityCompatible(a, b)).toBe(true);
+        expect(isSafeToCopyOAuthIdentity(a, b)).toBe(true);
       }
     }
   });
-});
 
-describe("isSafeToMirrorOAuthIdentity (mirror direction: strict-but-upgrade-tolerant)", () => {
-  describe("positive matches and no-identity cases", () => {
-    it("accepts matching accountIds", () => {
-      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, { accountId: "x" })).toBe(true);
-    });
-
-    it("accepts matching emails (case-insensitive)", () => {
-      expect(
-        isSafeToMirrorOAuthIdentity({ email: "u@example.com" }, { email: "U@Example.com" }),
-      ).toBe(true);
-    });
-
-    it("accepts when both sides carry no identity metadata", () => {
-      expect(isSafeToMirrorOAuthIdentity({}, {})).toBe(true);
-    });
-  });
-
-  describe("upgrade direction is allowed (existing has no identity, incoming does)", () => {
-    it("accepts existing-no-accountId adopting incoming-accountId", () => {
-      expect(isSafeToMirrorOAuthIdentity({}, { accountId: "x" })).toBe(true);
-    });
-
-    it("accepts existing-no-email adopting incoming-email", () => {
-      expect(isSafeToMirrorOAuthIdentity({}, { email: "u@example.com" })).toBe(true);
-    });
-
-    it("accepts when only existing.email is present and incoming carries same email + added accountId", () => {
-      expect(
-        isSafeToMirrorOAuthIdentity(
-          { email: "u@example.com" },
-          { accountId: "x", email: "u@example.com" },
-        ),
-      ).toBe(true);
-    });
-  });
-
-  describe("regression direction is refused (incoming drops identity present on existing)", () => {
-    it("refuses incoming-no-accountId when existing has accountId", () => {
-      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, {})).toBe(false);
-    });
-
-    it("refuses incoming-no-email when existing has email", () => {
-      expect(isSafeToMirrorOAuthIdentity({ email: "u@example.com" }, {})).toBe(false);
-    });
-
-    it("refuses when existing.accountId is dropped even if incoming adds a new email", () => {
-      // incoming gains an email field but loses the accountId main already
-      // had. Losing the accountId marker would let future wrong-account
-      // sub-agents pass the relaxed adoption gate.
-      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, { email: "u@example.com" })).toBe(
-        false,
-      );
-    });
-  });
-
-  describe("positive mismatch still refuses", () => {
-    it("refuses mismatching accountIds", () => {
-      expect(isSafeToMirrorOAuthIdentity({ accountId: "a" }, { accountId: "b" })).toBe(false);
-    });
-
-    it("refuses mismatching emails when both expose only email", () => {
-      expect(
-        isSafeToMirrorOAuthIdentity({ email: "a@example.com" }, { email: "b@example.com" }),
-      ).toBe(false);
-    });
-  });
-
-  describe("relationship to the other two gates", () => {
-    it("is strictly stricter than isOAuthIdentityCompatible (drops are refused)", () => {
-      // Compatible says yes (no positive-mismatch evidence), mirror-safe
-      // says no (identity regression). Pins the asymmetry.
-      expect(isOAuthIdentityCompatible({ accountId: "x" }, {})).toBe(true);
-      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, {})).toBe(false);
-    });
-
-    it("is strictly more permissive than isSameOAuthIdentity (upgrades are allowed)", () => {
-      // Strict rule says no (asymmetric), mirror-safe says yes (upgrade).
-      expect(isSameOAuthIdentity({}, { accountId: "x" })).toBe(false);
-      expect(isSafeToMirrorOAuthIdentity({}, { accountId: "x" })).toBe(true);
-    });
+  it("unified rule never refuses a same-account pair and never accepts a different-account pair", () => {
+    // Over random identity pairs that share accountId but vary in every
+    // other field, the gate must always accept. Over pairs with distinct
+    // non-empty accountIds it must always refuse.
+    const rng = makeSeededRandom(0x9a_9b_9c_9d);
+    for (let i = 0; i < 500; i += 1) {
+      const shared = `acct-${randomString(rng, 32) || "x"}`;
+      const a = {
+        accountId: shared,
+        email: maybe(rng, randomString(rng, 32)),
+      };
+      const b = {
+        accountId: shared,
+        email: maybe(rng, randomString(rng, 32)),
+      };
+      expect(isSafeToCopyOAuthIdentity(a, b)).toBe(true);
+    }
   });
 });
 
