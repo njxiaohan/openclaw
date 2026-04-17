@@ -17,7 +17,7 @@ import { resolveSecretRefString, type SecretRefResolveCache } from "../../secret
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
 import { writeCodexCliCredentials } from "../cli-credentials.js";
-import { OAUTH_REFRESH_LOCK_OPTIONS, log } from "./constants.js";
+import { AUTH_STORE_LOCK_OPTIONS, OAUTH_REFRESH_LOCK_OPTIONS, log } from "./constants.js";
 import { resolveTokenExpiryState } from "./credential-state.js";
 import { formatAuthDoctorHint } from "./doctor.js";
 import {
@@ -31,6 +31,7 @@ import {
   ensureAuthProfileStore,
   loadAuthProfileStoreForSecretsRuntime,
   saveAuthProfileStore,
+  updateAuthProfileStoreWithLock,
 } from "./store.js";
 import type { AuthProfileStore, OAuthCredential } from "./types.js";
 
@@ -261,43 +262,102 @@ async function refreshOAuthTokenWithLock(params: {
  * agents adopt it on their next `adoptNewerMainOAuthCredential` pass instead
  * of racing to refresh the (now-single-used) refresh token.
  *
+ * Identity binding (CWE-284): we require positive evidence the existing main
+ * credential and the refreshed credential belong to the same account before
+ * overwriting. If both sides expose `accountId` (strongest signal, Codex CLI)
+ * they must match; otherwise if both expose `email` they must match (case-
+ * insensitive, trimmed). Provider-only matches are not sufficient because
+ * nothing guarantees two agents with the same profileId are authenticated as
+ * the same user. This prevents a compromised sub-agent from poisoning the
+ * main store's credentials.
+ *
+ * Serialization: uses `updateAuthProfileStoreWithLock` so the read-modify-
+ * write takes the main-store lock and cannot race with other main-store
+ * writers (e.g. `updateAuthProfileStoreWithLock` in other flows, CLI-sync).
+ *
  * Intentionally best-effort: a failure here must not fail the caller's
- * refresh, since the credential has already been persisted to the agent's own
- * store and returned to the requester.
+ * refresh, since the credential has already been persisted to the agent's
+ * own store and returned to the requester.
  */
-function mirrorRefreshedCredentialIntoMainStore(params: {
+function normalizeAuthIdentityToken(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeAuthEmailToken(value: string | undefined): string | undefined {
+  return normalizeAuthIdentityToken(value)?.toLowerCase();
+}
+
+/**
+ * Returns true if `existing` and `incoming` provably belong to the same
+ * account. Used to gate cross-agent credential mirroring.
+ */
+function isSameOAuthIdentity(
+  existing: Pick<OAuthCredential, "accountId" | "email">,
+  incoming: Pick<OAuthCredential, "accountId" | "email">,
+): boolean {
+  const aAcct = normalizeAuthIdentityToken(existing.accountId);
+  const bAcct = normalizeAuthIdentityToken(incoming.accountId);
+  if (aAcct !== undefined && bAcct !== undefined) {
+    return aAcct === bAcct;
+  }
+  const aEmail = normalizeAuthEmailToken(existing.email);
+  const bEmail = normalizeAuthEmailToken(incoming.email);
+  if (aEmail !== undefined && bEmail !== undefined) {
+    return aEmail === bEmail;
+  }
+  // Neither side carries identity metadata; fall back to "no evidence of
+  // mismatch". Provider equality is checked separately by the caller; this
+  // mirrors the looser behaviour of the pre-existing
+  // `adoptNewerMainOAuthCredential` gate.
+  return true;
+}
+
+async function mirrorRefreshedCredentialIntoMainStore(params: {
   profileId: string;
   refreshed: OAuthCredential;
-}): void {
+}): Promise<void> {
   try {
     const mainPath = resolveAuthStorePath(undefined);
     ensureAuthStoreFile(mainPath);
-    const mainStore = loadAuthProfileStoreForSecretsRuntime(undefined);
-    const existing = mainStore.profiles[params.profileId];
-    if (existing && existing.type !== "oauth") {
-      return;
-    }
-    if (existing && existing.provider !== params.refreshed.provider) {
-      return;
-    }
-    // Only overwrite when the incoming credential is strictly fresher
-    // (or main has no usable expiry). This avoids clobbering a concurrent
-    // successful refresh performed by the main agent itself.
-    if (
-      existing &&
-      Number.isFinite(existing.expires) &&
-      Number.isFinite(params.refreshed.expires) &&
-      existing.expires >= params.refreshed.expires
-    ) {
-      return;
-    }
-    mainStore.profiles[params.profileId] = { ...params.refreshed };
-    saveAuthProfileStore(mainStore, undefined);
-    log.debug("mirrored refreshed OAuth credential to main agent store", {
-      profileId: params.profileId,
-      expires: Number.isFinite(params.refreshed.expires)
-        ? new Date(params.refreshed.expires).toISOString()
-        : undefined,
+    await updateAuthProfileStoreWithLock({
+      agentDir: undefined,
+      updater: (store) => {
+        const existing = store.profiles[params.profileId];
+        if (existing && existing.type !== "oauth") {
+          return false;
+        }
+        if (existing && existing.provider !== params.refreshed.provider) {
+          return false;
+        }
+        // Positive identity binding: refuse to overwrite a credential that
+        // verifiably belongs to a different account.
+        if (existing && !isSameOAuthIdentity(existing, params.refreshed)) {
+          log.warn("refused to mirror OAuth credential: identity mismatch", {
+            profileId: params.profileId,
+          });
+          return false;
+        }
+        // Only overwrite when the incoming credential is strictly fresher
+        // (or main has no usable expiry). Prevents clobbering a concurrent
+        // successful refresh performed by the main agent itself.
+        if (
+          existing &&
+          Number.isFinite(existing.expires) &&
+          Number.isFinite(params.refreshed.expires) &&
+          existing.expires >= params.refreshed.expires
+        ) {
+          return false;
+        }
+        store.profiles[params.profileId] = { ...params.refreshed };
+        log.debug("mirrored refreshed OAuth credential to main agent store", {
+          profileId: params.profileId,
+          expires: Number.isFinite(params.refreshed.expires)
+            ? new Date(params.refreshed.expires).toISOString()
+            : undefined,
+        });
+        return true;
+      },
     });
   } catch (err) {
     log.debug("mirrorRefreshedCredentialIntoMainStore failed", {
@@ -313,195 +373,198 @@ async function doRefreshOAuthTokenWithLock(params: {
 }): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
   const authPath = resolveAuthStorePath(params.agentDir);
   ensureAuthStoreFile(authPath);
-  // Cross-agent coordination: every agent that tries to refresh this profile
-  // acquires the same global lock file (path derived from sha256(profileId)),
-  // so only one performs the actual HTTP refresh at a time. Before this
-  // change the file lock was on `authPath`, which is per-agent, and 18
-  // Codex agents sharing one OAuth profile would all refresh in parallel
-  // and nuke each other with `refresh_token_reused`. See issue #26322.
+  // Two-layer coordination:
+  //   1. Global refresh lock keyed on sha256(profileId): every agent trying
+  //      to refresh the same profile acquires the same file lock, so only
+  //      one HTTP refresh is in-flight at a time (#26322).
+  //   2. Per-store lock (AUTH_STORE_LOCK_OPTIONS) on this agent's
+  //      auth-profiles.json: serializes the refresh's read-modify-writes
+  //      with other writers of the same store (e.g. usage/profile updates
+  //      via updateAuthProfileStoreWithLock, CLI sync).
+  // Lock acquisition order is always refresh -> per-store; non-refresh code
+  // paths only take the per-store lock, so no cycle is possible.
   const globalRefreshLockPath = resolveOAuthRefreshLockPath(params.profileId);
 
-  const result = await withFileLock(globalRefreshLockPath, OAUTH_REFRESH_LOCK_OPTIONS, async () => {
-    // Locked refresh must bypass runtime snapshots so we can adopt fresher
-    // on-disk credentials written by another refresh attempt.
-    const store = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
-    const cred = store.profiles[params.profileId];
-    if (!cred || cred.type !== "oauth") {
-      return null;
-    }
-
-    if (Date.now() < cred.expires) {
-      return {
-        apiKey: await buildOAuthApiKey(cred.provider, cred),
-        newCredentials: cred,
-      };
-    }
-
-    // Inside-the-lock recheck: a prior agent that already held this lock may
-    // have completed a refresh and mirrored its fresh credential into the
-    // main store. If so, adopt into the local store and return without
-    // issuing another HTTP refresh. This is what turns N serialized
-    // refreshes into 1 refresh + (N-1) adoptions, preventing the
-    // `refresh_token_reused` storm reported in #26322.
-    if (params.agentDir) {
-      try {
-        const mainStore = loadAuthProfileStoreForSecretsRuntime(undefined);
-        const mainCred = mainStore.profiles[params.profileId];
-        if (
-          mainCred?.type === "oauth" &&
-          mainCred.provider === cred.provider &&
-          Number.isFinite(mainCred.expires) &&
-          Date.now() < mainCred.expires
-        ) {
-          store.profiles[params.profileId] = { ...mainCred };
-          saveAuthProfileStore(store, params.agentDir);
-          log.info("adopted fresh OAuth credential from main store (under refresh lock)", {
-            profileId: params.profileId,
-            agentDir: params.agentDir,
-            expires: new Date(mainCred.expires).toISOString(),
-          });
-          return {
-            apiKey: await buildOAuthApiKey(mainCred.provider, mainCred),
-            newCredentials: mainCred,
-          };
-        }
-      } catch (err) {
-        log.debug("inside-lock main-store adoption failed; proceeding to refresh", {
-          profileId: params.profileId,
-          error: formatErrorMessage(err),
-        });
+  return await withFileLock(globalRefreshLockPath, OAUTH_REFRESH_LOCK_OPTIONS, async () =>
+    withFileLock(authPath, AUTH_STORE_LOCK_OPTIONS, async () => {
+      // Locked refresh must bypass runtime snapshots so we can adopt fresher
+      // on-disk credentials written by another refresh attempt.
+      const store = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
+      const cred = store.profiles[params.profileId];
+      if (!cred || cred.type !== "oauth") {
+        return null;
       }
-    }
 
-    const externallyManaged = readManagedExternalCliCredential({
-      profileId: params.profileId,
-      credential: cred,
-    });
-    if (externallyManaged) {
-      if (!areOAuthCredentialsEquivalent(cred, externallyManaged)) {
-        store.profiles[params.profileId] = externallyManaged;
-        saveAuthProfileStore(store, params.agentDir);
-      }
-      if (Date.now() < externallyManaged.expires) {
+      if (Date.now() < cred.expires) {
         return {
-          apiKey: await buildOAuthApiKey(externallyManaged.provider, externallyManaged),
-          newCredentials: externallyManaged,
+          apiKey: await buildOAuthApiKey(cred.provider, cred),
+          newCredentials: cred,
         };
       }
-      if (externallyManaged.managedBy === "codex-cli") {
-        const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
-          provider: externallyManaged.provider,
-          context: externallyManaged,
-        });
-        if (pluginRefreshed) {
-          const refreshedCredentials: OAuthCredential = {
-            ...externallyManaged,
-            ...pluginRefreshed,
-            type: "oauth",
-            managedBy: "codex-cli",
-          };
-          if (!writeCodexCliCredentials(refreshedCredentials)) {
-            log.warn("failed to persist refreshed codex credentials back to Codex storage", {
+
+      // Inside-the-lock recheck: a prior agent that already held this lock may
+      // have completed a refresh and mirrored its fresh credential into the
+      // main store. If so, adopt into the local store and return without
+      // issuing another HTTP refresh. This is what turns N serialized
+      // refreshes into 1 refresh + (N-1) adoptions, preventing the
+      // `refresh_token_reused` storm reported in #26322.
+      if (params.agentDir) {
+        try {
+          const mainStore = loadAuthProfileStoreForSecretsRuntime(undefined);
+          const mainCred = mainStore.profiles[params.profileId];
+          if (
+            mainCred?.type === "oauth" &&
+            mainCred.provider === cred.provider &&
+            Number.isFinite(mainCred.expires) &&
+            Date.now() < mainCred.expires
+          ) {
+            store.profiles[params.profileId] = { ...mainCred };
+            saveAuthProfileStore(store, params.agentDir);
+            log.info("adopted fresh OAuth credential from main store (under refresh lock)", {
               profileId: params.profileId,
+              agentDir: params.agentDir,
+              expires: new Date(mainCred.expires).toISOString(),
             });
+            return {
+              apiKey: await buildOAuthApiKey(mainCred.provider, mainCred),
+              newCredentials: mainCred,
+            };
           }
-          store.profiles[params.profileId] = refreshedCredentials;
-          saveAuthProfileStore(store, params.agentDir);
-          return {
-            apiKey: await buildOAuthApiKey(refreshedCredentials.provider, refreshedCredentials),
-            newCredentials: refreshedCredentials,
-          };
+        } catch (err) {
+          log.debug("inside-lock main-store adoption failed; proceeding to refresh", {
+            profileId: params.profileId,
+            error: formatErrorMessage(err),
+          });
         }
       }
-      throw new Error(
-        `${externallyManaged.managedBy} credential is expired; refresh it in the external CLI and retry.`,
-      );
-    }
-    if (cred.managedBy) {
-      throw new Error(
-        `${cred.managedBy} credential is unavailable; re-authenticate in the external CLI and retry.`,
-      );
-    }
 
-    const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
-      provider: cred.provider,
-      context: cred,
-    });
-    if (pluginRefreshed) {
-      const refreshedCredentials: OAuthCredential = {
-        ...cred,
-        ...pluginRefreshed,
-        type: "oauth",
-      };
-      store.profiles[params.profileId] = refreshedCredentials;
-      saveAuthProfileStore(store, params.agentDir);
-      return {
-        apiKey: await buildOAuthApiKey(cred.provider, refreshedCredentials),
-        newCredentials: refreshedCredentials,
-      };
-    }
-
-    const oauthCreds: Record<string, OAuthCredentials> = { [cred.provider]: cred };
-    const result =
-      cred.provider === "chutes"
-        ? await (async () => {
-            const newCredentials = await refreshChutesTokens({
-              credential: cred,
-            });
-            return { apiKey: newCredentials.access, newCredentials };
-          })()
-        : await (async () => {
-            const oauthProvider = resolveOAuthProvider(cred.provider);
-            if (!oauthProvider) {
-              return null;
+      const externallyManaged = readManagedExternalCliCredential({
+        profileId: params.profileId,
+        credential: cred,
+      });
+      if (externallyManaged) {
+        if (!areOAuthCredentialsEquivalent(cred, externallyManaged)) {
+          store.profiles[params.profileId] = externallyManaged;
+          saveAuthProfileStore(store, params.agentDir);
+        }
+        if (Date.now() < externallyManaged.expires) {
+          return {
+            apiKey: await buildOAuthApiKey(externallyManaged.provider, externallyManaged),
+            newCredentials: externallyManaged,
+          };
+        }
+        if (externallyManaged.managedBy === "codex-cli") {
+          const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
+            provider: externallyManaged.provider,
+            context: externallyManaged,
+          });
+          if (pluginRefreshed) {
+            const refreshedCredentials: OAuthCredential = {
+              ...externallyManaged,
+              ...pluginRefreshed,
+              type: "oauth",
+              managedBy: "codex-cli",
+            };
+            if (!writeCodexCliCredentials(refreshedCredentials)) {
+              log.warn("failed to persist refreshed codex credentials back to Codex storage", {
+                profileId: params.profileId,
+              });
             }
-            if (typeof getOAuthApiKey !== "function") {
-              return null;
-            }
-            return await getOAuthApiKey(oauthProvider, oauthCreds);
-          })();
-    if (!result) {
-      return null;
-    }
-    store.profiles[params.profileId] = {
-      ...cred,
-      ...result.newCredentials,
-      type: "oauth",
-    };
-    saveAuthProfileStore(store, params.agentDir);
+            store.profiles[params.profileId] = refreshedCredentials;
+            saveAuthProfileStore(store, params.agentDir);
+            return {
+              apiKey: await buildOAuthApiKey(refreshedCredentials.provider, refreshedCredentials),
+              newCredentials: refreshedCredentials,
+            };
+          }
+        }
+        throw new Error(
+          `${externallyManaged.managedBy} credential is expired; refresh it in the external CLI and retry.`,
+        );
+      }
+      if (cred.managedBy) {
+        throw new Error(
+          `${cred.managedBy} credential is unavailable; re-authenticate in the external CLI and retry.`,
+        );
+      }
 
-    return result;
-  });
-
-  // Post-lock: mirror the refreshed credential into the main-agent store so
-  // peer agents can adopt instead of racing. Only meaningful for secondary
-  // agents; for the main agent this would be a self-write (we're already in
-  // the main store). Done outside the refresh lock to release it ASAP.
-  if (result?.newCredentials && params.agentDir) {
-    const mainPath = resolveAuthStorePath(undefined);
-    const localPath = resolveAuthStorePath(params.agentDir);
-    if (mainPath !== localPath) {
-      const localStore = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
-      const localProfile = localStore.profiles[params.profileId];
-      // Only mirror when the local agent has a concrete OAuth profile that we
-      // just refreshed; if the agent was inheriting from main (no local
-      // oauth entry) the main store is already the canonical record and no
-      // mirror is needed.
-      if (localProfile?.type === "oauth") {
-        const refreshedCred: OAuthCredential = {
-          ...localProfile,
-          ...result.newCredentials,
+      const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
+        provider: cred.provider,
+        context: cred,
+      });
+      if (pluginRefreshed) {
+        const refreshedCredentials: OAuthCredential = {
+          ...cred,
+          ...pluginRefreshed,
           type: "oauth",
         };
-        mirrorRefreshedCredentialIntoMainStore({
-          profileId: params.profileId,
-          refreshed: refreshedCred,
-        });
+        store.profiles[params.profileId] = refreshedCredentials;
+        saveAuthProfileStore(store, params.agentDir);
+        if (params.agentDir) {
+          const mainPath = resolveAuthStorePath(undefined);
+          if (mainPath !== authPath) {
+            await mirrorRefreshedCredentialIntoMainStore({
+              profileId: params.profileId,
+              refreshed: refreshedCredentials,
+            });
+          }
+        }
+        return {
+          apiKey: await buildOAuthApiKey(cred.provider, refreshedCredentials),
+          newCredentials: refreshedCredentials,
+        };
       }
-    }
-  }
 
-  return result;
+      const oauthCreds: Record<string, OAuthCredentials> = { [cred.provider]: cred };
+      const result =
+        cred.provider === "chutes"
+          ? await (async () => {
+              const newCredentials = await refreshChutesTokens({
+                credential: cred,
+              });
+              return { apiKey: newCredentials.access, newCredentials };
+            })()
+          : await (async () => {
+              const oauthProvider = resolveOAuthProvider(cred.provider);
+              if (!oauthProvider) {
+                return null;
+              }
+              if (typeof getOAuthApiKey !== "function") {
+                return null;
+              }
+              return await getOAuthApiKey(oauthProvider, oauthCreds);
+            })();
+      if (!result) {
+        return null;
+      }
+      const mergedCred: OAuthCredential = {
+        ...cred,
+        ...result.newCredentials,
+        type: "oauth",
+      };
+      store.profiles[params.profileId] = mergedCred;
+      saveAuthProfileStore(store, params.agentDir);
+
+      // Mirror the refreshed credential back into the main-agent store while
+      // both locks are still held (refresh lock + this agent's store lock)
+      // plus we'll take main-store lock inside the mirror. Doing this inside
+      // the refresh lock closes the cross-process race window where a second
+      // agent could acquire the refresh lock between our lock release and
+      // our main-store write, see only stale main creds, and redundantly
+      // refresh (reproducing refresh_token_reused).
+      if (params.agentDir) {
+        const mainPath = resolveAuthStorePath(undefined);
+        if (mainPath !== authPath) {
+          await mirrorRefreshedCredentialIntoMainStore({
+            profileId: params.profileId,
+            refreshed: mergedCred,
+          });
+        }
+      }
+
+      return result;
+    }),
+  );
 }
 
 async function tryResolveOAuthProfile(

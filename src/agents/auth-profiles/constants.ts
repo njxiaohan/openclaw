@@ -28,6 +28,12 @@ export const AUTH_STORE_LOCK_OPTIONS = {
 // AUTH_STORE_LOCK_OPTIONS guards per-store file writes. Keeping them distinct
 // lets us widen the refresh lock's timeout/retry budget without affecting the
 // hot-path auth-store writers.
+//
+// NOTE: the values below are currently byte-identical to AUTH_STORE_LOCK_OPTIONS.
+// They are declared separately so callers can diverge here when the refresh
+// path needs different retry/staleness behaviour (e.g. longer `stale` to
+// survive slow plugin-driven refreshes, or a hard refresh timeout below the
+// staleness threshold). Do not re-unify them with AUTH_STORE_LOCK_OPTIONS.
 export const OAUTH_REFRESH_LOCK_OPTIONS = {
   retries: {
     retries: 10,
