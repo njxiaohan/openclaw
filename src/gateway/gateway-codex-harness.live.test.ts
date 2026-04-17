@@ -533,20 +533,24 @@ describeLive("gateway live (Codex harness)", () => {
             "Current session model is `codex/",
             "The current session is using `codex/",
             "Configured model from `~/.codex/config.toml`:",
+            "Configured models in this session:",
+            "Default model:",
             "Current OpenClaw session status reports the active model as:",
           ],
           isExpectedText: (text) => {
-            if (!text.includes("`codex models`")) {
-              return false;
-            }
-            return (
-              text.includes("did not run") ||
-              text.includes("could not run") ||
-              text.includes("could not be run") ||
-              text.includes("failed in this sandbox") ||
-              text.includes("failed with:") ||
-              text.includes("repo-local fallback")
-            );
+            const isSandboxFallback =
+              text.includes("`codex models`") &&
+              (text.includes("did not run") ||
+                text.includes("could not run") ||
+                text.includes("could not be run") ||
+                text.includes("failed in this sandbox") ||
+                text.includes("failed with:") ||
+                text.includes("repo-local fallback"));
+            const isSessionConfigFallback =
+              text.includes("Configured models in this session:") &&
+              text.includes("Default model:") &&
+              text.includes("`codex/");
+            return isSandboxFallback || isSessionConfigFallback;
           },
         });
         logCodexLiveStep("codex-models-command", { modelsText });
