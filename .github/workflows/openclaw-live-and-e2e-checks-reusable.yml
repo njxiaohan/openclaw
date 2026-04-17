@@ -626,13 +626,10 @@ jobs:
               echo "OPENCLAW_LIVE_CLI_BACKEND_AUTH=api-key" >> "$GITHUB_ENV"
               ;;
             live-codex-harness-docker)
-              # Prefer the staged Codex auth files when the caller provided them.
-              # Fall back to API-key mode only when those secrets are unavailable.
-              if [[ -n "${OPENCLAW_CODEX_AUTH_JSON:-}" ]]; then
-                echo "OPENCLAW_LIVE_CODEX_HARNESS_AUTH=codex-auth" >> "$GITHUB_ENV"
-              else
-                echo "OPENCLAW_LIVE_CODEX_HARNESS_AUTH=api-key" >> "$GITHUB_ENV"
-              fi
+              # Keep CI on the API-key path for now. The staged Codex auth secret
+              # is currently stale, but the wrapper still supports codex-auth for
+              # local maintainer reruns without changing Peter's flow.
+              echo "OPENCLAW_LIVE_CODEX_HARNESS_AUTH=api-key" >> "$GITHUB_ENV"
               ;;
             live-acp-bind-docker)
               echo "OPENCLAW_LIVE_ACP_BIND_AGENTS=claude,codex,gemini" >> "$GITHUB_ENV"
