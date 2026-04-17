@@ -17,14 +17,14 @@ import { resolveSecretRefString, type SecretRefResolveCache } from "../../secret
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
 import { writeCodexCliCredentials } from "../cli-credentials.js";
-import { AUTH_STORE_LOCK_OPTIONS, log } from "./constants.js";
+import { OAUTH_REFRESH_LOCK_OPTIONS, log } from "./constants.js";
 import { resolveTokenExpiryState } from "./credential-state.js";
 import { formatAuthDoctorHint } from "./doctor.js";
 import {
   areOAuthCredentialsEquivalent,
   readManagedExternalCliCredential,
 } from "./external-cli-sync.js";
-import { ensureAuthStoreFile, resolveAuthStorePath } from "./paths.js";
+import { ensureAuthStoreFile, resolveAuthStorePath, resolveOAuthRefreshLockPath } from "./paths.js";
 import { assertNoOAuthSecretRefPolicyViolations } from "./policy.js";
 import { suggestOAuthProfileIdForLegacyDefault } from "./repair.js";
 import {
@@ -216,14 +216,112 @@ function adoptNewerMainOAuthCredential(params: {
   return null;
 }
 
+// In-process serialization: callers for the same profileId are chained so only
+// one enters doRefreshOAuthTokenWithLock at a time. Necessary because
+// withFileLock is re-entrant within the same PID (HELD_LOCKS short-circuits),
+// which would otherwise let two concurrent same-PID callers both pass the file
+// lock gate and race to refresh. Keyed by profileId (not agentDir) so agents
+// sharing a profile serialize correctly in-process as well as cross-process.
+const refreshQueues = new Map<string, Promise<unknown>>();
+
+/**
+ * Drop any in-flight entries in the module-level refresh queue. Intended
+ * exclusively for tests that exercise the concurrent-refresh surface; a
+ * timed-out test can leave pending gates in the map and confuse subsequent
+ * tests that share the same Vitest worker.
+ */
+export function resetOAuthRefreshQueuesForTest(): void {
+  refreshQueues.clear();
+}
+
 async function refreshOAuthTokenWithLock(params: {
+  profileId: string;
+  agentDir?: string;
+}): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
+  const key = params.profileId;
+  const prev = refreshQueues.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  refreshQueues.set(key, gate);
+  try {
+    await prev;
+    return await doRefreshOAuthTokenWithLock(params);
+  } finally {
+    release();
+    if (refreshQueues.get(key) === gate) {
+      refreshQueues.delete(key);
+    }
+  }
+}
+
+/**
+ * Mirror a refreshed OAuth credential back into the main-agent store so peer
+ * agents adopt it on their next `adoptNewerMainOAuthCredential` pass instead
+ * of racing to refresh the (now-single-used) refresh token.
+ *
+ * Intentionally best-effort: a failure here must not fail the caller's
+ * refresh, since the credential has already been persisted to the agent's own
+ * store and returned to the requester.
+ */
+function mirrorRefreshedCredentialIntoMainStore(params: {
+  profileId: string;
+  refreshed: OAuthCredential;
+}): void {
+  try {
+    const mainPath = resolveAuthStorePath(undefined);
+    ensureAuthStoreFile(mainPath);
+    const mainStore = loadAuthProfileStoreForSecretsRuntime(undefined);
+    const existing = mainStore.profiles[params.profileId];
+    if (existing && existing.type !== "oauth") {
+      return;
+    }
+    if (existing && existing.provider !== params.refreshed.provider) {
+      return;
+    }
+    // Only overwrite when the incoming credential is strictly fresher
+    // (or main has no usable expiry). This avoids clobbering a concurrent
+    // successful refresh performed by the main agent itself.
+    if (
+      existing &&
+      Number.isFinite(existing.expires) &&
+      Number.isFinite(params.refreshed.expires) &&
+      existing.expires >= params.refreshed.expires
+    ) {
+      return;
+    }
+    mainStore.profiles[params.profileId] = { ...params.refreshed };
+    saveAuthProfileStore(mainStore, undefined);
+    log.debug("mirrored refreshed OAuth credential to main agent store", {
+      profileId: params.profileId,
+      expires: Number.isFinite(params.refreshed.expires)
+        ? new Date(params.refreshed.expires).toISOString()
+        : undefined,
+    });
+  } catch (err) {
+    log.debug("mirrorRefreshedCredentialIntoMainStore failed", {
+      profileId: params.profileId,
+      error: formatErrorMessage(err),
+    });
+  }
+}
+
+async function doRefreshOAuthTokenWithLock(params: {
   profileId: string;
   agentDir?: string;
 }): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
   const authPath = resolveAuthStorePath(params.agentDir);
   ensureAuthStoreFile(authPath);
+  // Cross-agent coordination: every agent that tries to refresh this profile
+  // acquires the same global lock file (path derived from sha256(profileId)),
+  // so only one performs the actual HTTP refresh at a time. Before this
+  // change the file lock was on `authPath`, which is per-agent, and 18
+  // Codex agents sharing one OAuth profile would all refresh in parallel
+  // and nuke each other with `refresh_token_reused`. See issue #26322.
+  const globalRefreshLockPath = resolveOAuthRefreshLockPath(params.profileId);
 
-  return await withFileLock(authPath, AUTH_STORE_LOCK_OPTIONS, async () => {
+  const result = await withFileLock(globalRefreshLockPath, OAUTH_REFRESH_LOCK_OPTIONS, async () => {
     // Locked refresh must bypass runtime snapshots so we can adopt fresher
     // on-disk credentials written by another refresh attempt.
     const store = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
@@ -237,6 +335,42 @@ async function refreshOAuthTokenWithLock(params: {
         apiKey: await buildOAuthApiKey(cred.provider, cred),
         newCredentials: cred,
       };
+    }
+
+    // Inside-the-lock recheck: a prior agent that already held this lock may
+    // have completed a refresh and mirrored its fresh credential into the
+    // main store. If so, adopt into the local store and return without
+    // issuing another HTTP refresh. This is what turns N serialized
+    // refreshes into 1 refresh + (N-1) adoptions, preventing the
+    // `refresh_token_reused` storm reported in #26322.
+    if (params.agentDir) {
+      try {
+        const mainStore = loadAuthProfileStoreForSecretsRuntime(undefined);
+        const mainCred = mainStore.profiles[params.profileId];
+        if (
+          mainCred?.type === "oauth" &&
+          mainCred.provider === cred.provider &&
+          Number.isFinite(mainCred.expires) &&
+          Date.now() < mainCred.expires
+        ) {
+          store.profiles[params.profileId] = { ...mainCred };
+          saveAuthProfileStore(store, params.agentDir);
+          log.info("adopted fresh OAuth credential from main store (under refresh lock)", {
+            profileId: params.profileId,
+            agentDir: params.agentDir,
+            expires: new Date(mainCred.expires).toISOString(),
+          });
+          return {
+            apiKey: await buildOAuthApiKey(mainCred.provider, mainCred),
+            newCredentials: mainCred,
+          };
+        }
+      } catch (err) {
+        log.debug("inside-lock main-store adoption failed; proceeding to refresh", {
+          profileId: params.profileId,
+          error: formatErrorMessage(err),
+        });
+      }
     }
 
     const externallyManaged = readManagedExternalCliCredential({
@@ -338,6 +472,36 @@ async function refreshOAuthTokenWithLock(params: {
 
     return result;
   });
+
+  // Post-lock: mirror the refreshed credential into the main-agent store so
+  // peer agents can adopt instead of racing. Only meaningful for secondary
+  // agents; for the main agent this would be a self-write (we're already in
+  // the main store). Done outside the refresh lock to release it ASAP.
+  if (result?.newCredentials && params.agentDir) {
+    const mainPath = resolveAuthStorePath(undefined);
+    const localPath = resolveAuthStorePath(params.agentDir);
+    if (mainPath !== localPath) {
+      const localStore = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
+      const localProfile = localStore.profiles[params.profileId];
+      // Only mirror when the local agent has a concrete OAuth profile that we
+      // just refreshed; if the agent was inheriting from main (no local
+      // oauth entry) the main store is already the canonical record and no
+      // mirror is needed.
+      if (localProfile?.type === "oauth") {
+        const refreshedCred: OAuthCredential = {
+          ...localProfile,
+          ...result.newCredentials,
+          type: "oauth",
+        };
+        mirrorRefreshedCredentialIntoMainStore({
+          profileId: params.profileId,
+          refreshed: refreshedCred,
+        });
+      }
+    }
+  }
+
+  return result;
 }
 
 async function tryResolveOAuthProfile(

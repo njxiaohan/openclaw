@@ -23,6 +23,22 @@ export const AUTH_STORE_LOCK_OPTIONS = {
   stale: 30_000,
 } as const;
 
+// Separate from AUTH_STORE_LOCK_OPTIONS for independent tuning: this lock
+// serializes the cross-agent OAuth refresh (see issue #26322), whereas
+// AUTH_STORE_LOCK_OPTIONS guards per-store file writes. Keeping them distinct
+// lets us widen the refresh lock's timeout/retry budget without affecting the
+// hot-path auth-store writers.
+export const OAUTH_REFRESH_LOCK_OPTIONS = {
+  retries: {
+    retries: 10,
+    factor: 2,
+    minTimeout: 100,
+    maxTimeout: 10_000,
+    randomize: true,
+  },
+  stale: 30_000,
+} as const;
+
 export const EXTERNAL_CLI_SYNC_TTL_MS = 15 * 60 * 1000;
 export const EXTERNAL_CLI_NEAR_EXPIRY_MS = 10 * 60 * 1000;
 
