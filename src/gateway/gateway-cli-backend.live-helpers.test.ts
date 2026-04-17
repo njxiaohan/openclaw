@@ -152,6 +152,11 @@ describe("gateway cli backend live helpers", () => {
         "The `cron` MCP tool call was cancelled (`user cancelled MCP tool call`).",
       ),
     ).toBe(true);
+    expect(
+      shouldRetryCliCronMcpProbeReply(
+        "The tool call was cancelled before completion, so I can’t verify the cron job was created.",
+      ),
+    ).toBe(true);
     expect(shouldRetryCliCronMcpProbeReply("live-mcp-abc123")).toBe(false);
   });
 });
