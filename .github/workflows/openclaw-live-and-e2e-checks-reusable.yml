@@ -168,6 +168,7 @@ jobs:
         id: validate
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.ref }}
         shell: bash
         run: |
           set -euo pipefail
@@ -193,7 +194,7 @@ jobs:
           fi
 
           if [[ -z "$trusted_reason" ]]; then
-            echo "Ref '${{ inputs.ref }}' resolved to $selected_sha, which is not trusted for secret-bearing live/E2E checks." >&2
+            echo "Ref '${INPUT_REF}' resolved to $selected_sha, which is not trusted for secret-bearing live/E2E checks." >&2
             echo "Allowed refs must be on main, point to a release tag, or match an open PR head in ${GITHUB_REPOSITORY}." >&2
             exit 1
           fi
@@ -201,7 +202,7 @@ jobs:
           echo "selected_sha=$selected_sha" >> "$GITHUB_OUTPUT"
           echo "trusted_reason=$trusted_reason" >> "$GITHUB_OUTPUT"
           {
-            echo "Validated ref: \`${{ inputs.ref }}\`"
+            echo "Validated ref: \`${INPUT_REF}\`"
             echo "Resolved SHA: \`$selected_sha\`"
             echo "Trust reason: \`$trusted_reason\`"
           } >> "$GITHUB_STEP_SUMMARY"
