@@ -375,7 +375,12 @@ actor MacNodeRuntime {
             format: res.format.rawValue,
             base64: res.data.base64EncodedString(),
             width: res.width,
-            height: res.height,
+        let capturedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let res = try await services.snapshotScreen(
+            screenIndex: params.screenIndex,
+            maxWidth: params.maxWidth,
+            quality: params.quality,
+            format: params.format)
             screenIndex: params.screenIndex,
             capturedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
         return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: payload)
