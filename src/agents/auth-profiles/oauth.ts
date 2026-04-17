@@ -17,7 +17,12 @@ import { resolveSecretRefString, type SecretRefResolveCache } from "../../secret
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
 import { writeCodexCliCredentials } from "../cli-credentials.js";
-import { AUTH_STORE_LOCK_OPTIONS, OAUTH_REFRESH_LOCK_OPTIONS, log } from "./constants.js";
+import {
+  AUTH_STORE_LOCK_OPTIONS,
+  OAUTH_REFRESH_CALL_TIMEOUT_MS,
+  OAUTH_REFRESH_LOCK_OPTIONS,
+  log,
+} from "./constants.js";
 import { resolveTokenExpiryState } from "./credential-state.js";
 import { formatAuthDoctorHint } from "./doctor.js";
 import {
@@ -217,13 +222,46 @@ function adoptNewerMainOAuthCredential(params: {
   return null;
 }
 
-// In-process serialization: callers for the same profileId are chained so only
-// one enters doRefreshOAuthTokenWithLock at a time. Necessary because
-// withFileLock is re-entrant within the same PID (HELD_LOCKS short-circuits),
-// which would otherwise let two concurrent same-PID callers both pass the file
-// lock gate and race to refresh. Keyed by profileId (not agentDir) so agents
-// sharing a profile serialize correctly in-process as well as cross-process.
+// In-process serialization: callers for the same provider+profileId are
+// chained so only one enters doRefreshOAuthTokenWithLock at a time.
+// Necessary because withFileLock is re-entrant within the same PID
+// (HELD_LOCKS short-circuits), which would otherwise let two concurrent
+// same-PID callers both pass the file lock gate and race to refresh.
+//
+// The key is `${provider}\0${profileId}` (matching the cross-agent file
+// lock key) so two profiles that happen to share a profileId across
+// providers do not needlessly serialize against each other.
 const refreshQueues = new Map<string, Promise<unknown>>();
+
+function refreshQueueKey(provider: string, profileId: string): string {
+  return `${provider}\u0000${profileId}`;
+}
+
+/**
+ * Wrap an async call with a hard timeout, rejecting the promise if the
+ * underlying work exceeds the deadline. Used on the OAuth refresh critical
+ * section so the in-flight lock is always released well before
+ * OAUTH_REFRESH_LOCK_OPTIONS.stale would let a peer reclaim it.
+ */
+async function withRefreshCallTimeout<T>(
+  label: string,
+  timeoutMs: number,
+  fn: () => Promise<T>,
+): Promise<T> {
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`OAuth refresh call "${label}" exceeded hard timeout (${timeoutMs}ms)`));
+      }, timeoutMs);
+      fn().then(resolve, reject);
+    });
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
 
 /**
  * Drop any in-flight entries in the module-level refresh queue. Intended
@@ -237,9 +275,10 @@ export function resetOAuthRefreshQueuesForTest(): void {
 
 async function refreshOAuthTokenWithLock(params: {
   profileId: string;
+  provider: string;
   agentDir?: string;
 }): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
-  const key = params.profileId;
+  const key = refreshQueueKey(params.provider, params.profileId);
   const prev = refreshQueues.get(key) ?? Promise.resolve();
   let release!: () => void;
   const gate = new Promise<void>((r) => {
@@ -291,6 +330,22 @@ export function normalizeAuthEmailToken(value: string | undefined): string | und
 /**
  * Returns true if `existing` and `incoming` provably belong to the same
  * account. Used to gate cross-agent credential mirroring.
+ *
+ * The rule is intentionally strict to satisfy the CWE-284 model:
+ *   1. If one side carries identity metadata (accountId or email) and the
+ *      other does not, refuse — we have no evidence they match.
+ *   2. If both sides carry identity, a shared field must match (accountId
+ *      wins over email when both present). If the two sides carry identity
+ *      in non-overlapping fields (one has only accountId, the other only
+ *      email), refuse.
+ *   3. If neither side carries identity, return true: no evidence of
+ *      mismatch and provider equality is checked separately by the caller.
+ *
+ * The previous permissive behaviour (fall back to `true` whenever a strict
+ * comparison could not be made) was unsafe: a sub-agent whose refreshed
+ * credential lacked identity metadata could overwrite a known-account main
+ * credential that had it, allowing cross-account poisoning through the
+ * mirror path.
  */
 export function isSameOAuthIdentity(
   existing: Pick<OAuthCredential, "accountId" | "email">,
@@ -298,18 +353,33 @@ export function isSameOAuthIdentity(
 ): boolean {
   const aAcct = normalizeAuthIdentityToken(existing.accountId);
   const bAcct = normalizeAuthIdentityToken(incoming.accountId);
-  if (aAcct !== undefined && bAcct !== undefined) {
-    return aAcct === bAcct;
-  }
   const aEmail = normalizeAuthEmailToken(existing.email);
   const bEmail = normalizeAuthEmailToken(incoming.email);
-  if (aEmail !== undefined && bEmail !== undefined) {
-    return aEmail === bEmail;
+  const aHasIdentity = aAcct !== undefined || aEmail !== undefined;
+  const bHasIdentity = bAcct !== undefined || bEmail !== undefined;
+
+  // Asymmetric identity evidence — refuse. We cannot prove the two
+  // credentials belong to the same account.
+  if (aHasIdentity !== bHasIdentity) {
+    return false;
   }
-  // Neither side carries identity metadata; fall back to "no evidence of
-  // mismatch". Provider equality is checked separately by the caller; this
-  // mirrors the looser behaviour of the pre-existing
-  // `adoptNewerMainOAuthCredential` gate.
+
+  // Both sides carry identity — require a positive match on a shared field.
+  if (aHasIdentity) {
+    if (aAcct !== undefined && bAcct !== undefined) {
+      return aAcct === bAcct;
+    }
+    if (aEmail !== undefined && bEmail !== undefined) {
+      return aEmail === bEmail;
+    }
+    // Identity metadata is present on both sides but in non-overlapping
+    // fields (one has accountId, the other has only email, or vice versa).
+    // No shared field to compare — refuse rather than guess.
+    return false;
+  }
+
+  // Neither side carries identity metadata — provider equality is checked
+  // separately by the caller; no evidence of mismatch here.
   return true;
 }
 
@@ -369,6 +439,7 @@ async function mirrorRefreshedCredentialIntoMainStore(params: {
 
 async function doRefreshOAuthTokenWithLock(params: {
   profileId: string;
+  provider: string;
   agentDir?: string;
 }): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
   const authPath = resolveAuthStorePath(params.agentDir);
@@ -383,7 +454,7 @@ async function doRefreshOAuthTokenWithLock(params: {
   //      via updateAuthProfileStoreWithLock, CLI sync).
   // Lock acquisition order is always refresh -> per-store; non-refresh code
   // paths only take the per-store lock, so no cycle is possible.
-  const globalRefreshLockPath = resolveOAuthRefreshLockPath(params.profileId);
+  const globalRefreshLockPath = resolveOAuthRefreshLockPath(params.provider, params.profileId);
 
   return await withFileLock(globalRefreshLockPath, OAUTH_REFRESH_LOCK_OPTIONS, async () =>
     withFileLock(authPath, AUTH_STORE_LOCK_OPTIONS, async () => {
@@ -454,10 +525,15 @@ async function doRefreshOAuthTokenWithLock(params: {
           };
         }
         if (externallyManaged.managedBy === "codex-cli") {
-          const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
-            provider: externallyManaged.provider,
-            context: externallyManaged,
-          });
+          const pluginRefreshed = await withRefreshCallTimeout(
+            `refreshProviderOAuthCredentialWithPlugin(${externallyManaged.provider}, codex-cli)`,
+            OAUTH_REFRESH_CALL_TIMEOUT_MS,
+            () =>
+              refreshProviderOAuthCredentialWithPlugin({
+                provider: externallyManaged.provider,
+                context: externallyManaged,
+              }),
+          );
           if (pluginRefreshed) {
             const refreshedCredentials: OAuthCredential = {
               ...externallyManaged,
@@ -488,10 +564,15 @@ async function doRefreshOAuthTokenWithLock(params: {
         );
       }
 
-      const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
-        provider: cred.provider,
-        context: cred,
-      });
+      const pluginRefreshed = await withRefreshCallTimeout(
+        `refreshProviderOAuthCredentialWithPlugin(${cred.provider})`,
+        OAUTH_REFRESH_CALL_TIMEOUT_MS,
+        () =>
+          refreshProviderOAuthCredentialWithPlugin({
+            provider: cred.provider,
+            context: cred,
+          }),
+      );
       if (pluginRefreshed) {
         const refreshedCredentials: OAuthCredential = {
           ...cred,
@@ -519,9 +600,11 @@ async function doRefreshOAuthTokenWithLock(params: {
       const result =
         cred.provider === "chutes"
           ? await (async () => {
-              const newCredentials = await refreshChutesTokens({
-                credential: cred,
-              });
+              const newCredentials = await withRefreshCallTimeout(
+                `refreshChutesTokens(${cred.provider})`,
+                OAUTH_REFRESH_CALL_TIMEOUT_MS,
+                () => refreshChutesTokens({ credential: cred }),
+              );
               return { apiKey: newCredentials.access, newCredentials };
             })()
           : await (async () => {
@@ -532,7 +615,11 @@ async function doRefreshOAuthTokenWithLock(params: {
               if (typeof getOAuthApiKey !== "function") {
                 return null;
               }
-              return await getOAuthApiKey(oauthProvider, oauthCreds);
+              return await withRefreshCallTimeout(
+                `getOAuthApiKey(${oauthProvider})`,
+                OAUTH_REFRESH_CALL_TIMEOUT_MS,
+                () => getOAuthApiKey(oauthProvider, oauthCreds),
+              );
             })();
       if (!result) {
         return null;
@@ -596,6 +683,7 @@ async function tryResolveOAuthProfile(
 
   const refreshed = await refreshOAuthTokenWithLock({
     profileId,
+    provider: cred.provider,
     agentDir: params.agentDir,
   });
   if (!refreshed) {
@@ -748,6 +836,7 @@ export async function resolveApiKeyForProfile(
   try {
     const result = await refreshOAuthTokenWithLock({
       profileId,
+      provider: cred.provider,
       agentDir: params.agentDir,
     });
     if (!result) {
@@ -790,6 +879,7 @@ export async function resolveApiKeyForProfile(
       }
       const retried = await refreshOAuthTokenWithLock({
         profileId,
+        provider: cred.provider,
         agentDir: params.agentDir,
       });
       if (retried) {

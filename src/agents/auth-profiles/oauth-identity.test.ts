@@ -93,7 +93,10 @@ describe("isSameOAuthIdentity", () => {
       );
     });
 
-    it("falls back to email when only one side has accountId", () => {
+    it("matches when main has accountId+email and incoming has only matching email", () => {
+      // Not asymmetric: both sides carry identity (main has more, but
+      // incoming still has email). Email is a shared field with a
+      // matching value — positive-identity match, safe to mirror.
       expect(
         isSameOAuthIdentity(
           { accountId: "acct-1", email: "user@example.com" },
@@ -102,13 +105,36 @@ describe("isSameOAuthIdentity", () => {
       ).toBe(true);
     });
 
-    it("falls back to email when accountIds are both whitespace-only (treated as absent)", () => {
+    it("matches when accountIds on one side are whitespace-only and both sides expose matching email", () => {
+      // Whitespace-only accountId is treated as absent; email falls back
+      // symmetrically on both sides so the positive email match wins.
       expect(
         isSameOAuthIdentity(
           { accountId: "   ", email: "user@example.com" },
           { accountId: "", email: "USER@example.com" },
         ),
       ).toBe(true);
+    });
+  });
+
+  describe("asymmetric identity evidence is refused", () => {
+    it("refuses when main has accountId and incoming has neither", () => {
+      expect(isSameOAuthIdentity({ accountId: "acct-1" }, {})).toBe(false);
+    });
+
+    it("refuses when main has email and incoming has neither", () => {
+      expect(isSameOAuthIdentity({ email: "user@example.com" }, {})).toBe(false);
+    });
+
+    it("refuses when incoming has identity but main does not", () => {
+      expect(isSameOAuthIdentity({}, { accountId: "acct-1" })).toBe(false);
+      expect(isSameOAuthIdentity({}, { email: "user@example.com" })).toBe(false);
+    });
+
+    it("refuses when main has only accountId and incoming has only email (non-overlapping fields)", () => {
+      expect(isSameOAuthIdentity({ accountId: "acct-1" }, { email: "user@example.com" })).toBe(
+        false,
+      );
     });
   });
 
