@@ -604,6 +604,125 @@ describe("resolveApiKeyForProfile OAuth refresh mirror-to-main (#26322)", () => 
     });
   });
 
+  it("mirrors an identity-carrying refresh into a main store that has no identity (upgrade)", async () => {
+    // The Codex P1 scenario: main holds a pre-capture OAuth record (no
+    // accountId), the fresh sub-agent refresh response carries accountId.
+    // Mirror must accept so subsequent peers can adopt from main instead
+    // of hitting refresh_token_reused.
+    const profileId = "openai-codex:default";
+    const provider = "openai-codex";
+    const freshExpiry = Date.now() + 60 * 60 * 1000;
+
+    const subAgentDir = path.join(tempRoot, "agents", "sub-upgrade-mirror", "agent");
+    await fs.mkdir(subAgentDir, { recursive: true });
+    // Sub has accountId (modern capture); stale.
+    saveAuthProfileStore(
+      createExpiredOauthStore({ profileId, provider, accountId: "acct-sub" }),
+      subAgentDir,
+    );
+    // Main is pre-capture — no accountId at all.
+    saveAuthProfileStore(
+      {
+        version: 1,
+        profiles: {
+          [profileId]: {
+            type: "oauth",
+            provider,
+            access: "main-pre-capture-access",
+            refresh: "main-pre-capture-refresh",
+            expires: Date.now() - 60_000,
+          },
+        },
+      },
+      mainAgentDir,
+    );
+
+    refreshProviderOAuthCredentialWithPluginMock.mockImplementationOnce(
+      async () =>
+        ({
+          type: "oauth",
+          provider,
+          access: "sub-refreshed-access",
+          refresh: "sub-refreshed-refresh",
+          expires: freshExpiry,
+          accountId: "acct-sub",
+        }) as never,
+    );
+
+    const result = await resolveApiKeyForProfile({
+      store: ensureAuthProfileStore(subAgentDir),
+      profileId,
+      agentDir: subAgentDir,
+    });
+    expect(result?.apiKey).toBe("sub-refreshed-access");
+
+    // Main must have accepted the mirror, with the identity marker added.
+    const mainRaw = JSON.parse(
+      await fs.readFile(path.join(mainAgentDir, "auth-profiles.json"), "utf8"),
+    ) as AuthProfileStore;
+    expect(mainRaw.profiles[profileId]).toMatchObject({
+      access: "sub-refreshed-access",
+      accountId: "acct-sub",
+    });
+  });
+
+  it("refuses to mirror when incoming drops an identity field present on main (regression guard)", async () => {
+    // Inverse of the upgrade test: main has accountId, incoming refresh
+    // response lacks it. Mirror must refuse so the identity marker is
+    // preserved — dropping it would later let a different-account sub pass
+    // the relaxed adoption gate.
+    const profileId = "openai-codex:default";
+    const provider = "openai-codex";
+    const freshExpiry = Date.now() + 60 * 60 * 1000;
+
+    const subAgentDir = path.join(tempRoot, "agents", "sub-regression", "agent");
+    await fs.mkdir(subAgentDir, { recursive: true });
+    saveAuthProfileStore(createExpiredOauthStore({ profileId, provider }), subAgentDir);
+    saveAuthProfileStore(
+      {
+        version: 1,
+        profiles: {
+          [profileId]: {
+            type: "oauth",
+            provider,
+            access: "main-identity-access",
+            refresh: "main-identity-refresh",
+            expires: Date.now() + 30 * 60 * 1000,
+            accountId: "acct-main",
+          },
+        },
+      },
+      mainAgentDir,
+    );
+
+    refreshProviderOAuthCredentialWithPluginMock.mockImplementationOnce(
+      async () =>
+        ({
+          type: "oauth",
+          provider,
+          access: "sub-refreshed-no-identity",
+          refresh: "sub-refreshed-no-identity-refresh",
+          expires: freshExpiry,
+          // intentionally no accountId / no email — the regression case
+        }) as never,
+    );
+
+    await resolveApiKeyForProfile({
+      store: ensureAuthProfileStore(subAgentDir),
+      profileId,
+      agentDir: subAgentDir,
+    });
+
+    // Main must still hold its accountId-bearing credential; mirror refused.
+    const mainRaw = JSON.parse(
+      await fs.readFile(path.join(mainAgentDir, "auth-profiles.json"), "utf8"),
+    ) as AuthProfileStore;
+    expect(mainRaw.profiles[profileId]).toMatchObject({
+      access: "main-identity-access",
+      accountId: "acct-main",
+    });
+  });
+
   it("mirrors refreshed credentials produced by the plugin-refresh path", async () => {
     // The plugin-refreshed branch in doRefreshOAuthTokenWithLock has its own
     // mirror call; cover it separately so the branch is not orphaned.

@@ -425,6 +425,45 @@ export function isOAuthIdentityCompatible(
   return true;
 }
 
+/**
+ * Identity gate used for the mirror direction (sub -> main). Strictly
+ * between `isSameOAuthIdentity` (too strict: refuses legitimate identity
+ * upgrades) and `isOAuthIdentityCompatible` (too loose: allows identity
+ * loss which later enables cross-account adoption).
+ *
+ * Rule: allow the mirror iff
+ *   1. there is no positive identity mismatch (same test as the relaxed
+ *      adoption gate), AND
+ *   2. the incoming credential carries at least as much identity
+ *      evidence as the existing one — i.e. if existing has
+ *      accountId/email, incoming must carry the same field.
+ *
+ * Rationale for (2): dropping an identity field on the main credential
+ * would defeat future adoption-gate checks from other agents that
+ * authenticate as different accounts. With main now identity-less, a
+ * wrong-account sub could pass the relaxed adopt check and inherit a
+ * credential that does not belong to it.
+ */
+export function isSafeToMirrorOAuthIdentity(
+  existing: Pick<OAuthCredential, "accountId" | "email">,
+  incoming: Pick<OAuthCredential, "accountId" | "email">,
+): boolean {
+  if (!isOAuthIdentityCompatible(existing, incoming)) {
+    return false;
+  }
+  const aAcct = normalizeAuthIdentityToken(existing.accountId);
+  const bAcct = normalizeAuthIdentityToken(incoming.accountId);
+  if (aAcct !== undefined && bAcct === undefined) {
+    return false;
+  }
+  const aEmail = normalizeAuthEmailToken(existing.email);
+  const bEmail = normalizeAuthEmailToken(incoming.email);
+  if (aEmail !== undefined && bEmail === undefined) {
+    return false;
+  }
+  return true;
+}
+
 async function mirrorRefreshedCredentialIntoMainStore(params: {
   profileId: string;
   refreshed: OAuthCredential;
@@ -442,10 +481,15 @@ async function mirrorRefreshedCredentialIntoMainStore(params: {
         if (existing && existing.provider !== params.refreshed.provider) {
           return false;
         }
-        // Positive identity binding: refuse to overwrite a credential that
-        // verifiably belongs to a different account.
-        if (existing && !isSameOAuthIdentity(existing, params.refreshed)) {
-          log.warn("refused to mirror OAuth credential: identity mismatch", {
+        // Identity binding for the mirror direction. Uses
+        // isSafeToMirrorOAuthIdentity (rather than isSameOAuthIdentity)
+        // so that legitimate identity upgrades are allowed (main has no
+        // accountId yet, incoming does — common in upgrade states) while
+        // still refusing positive mismatches AND identity regressions
+        // (main has accountId but incoming doesn't — would open a
+        // cross-account adoption vector for future peers).
+        if (existing && !isSafeToMirrorOAuthIdentity(existing, params.refreshed)) {
+          log.warn("refused to mirror OAuth credential: identity mismatch or regression", {
             profileId: params.profileId,
           });
           return false;

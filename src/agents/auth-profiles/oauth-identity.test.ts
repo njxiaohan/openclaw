@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isOAuthIdentityCompatible,
+  isSafeToMirrorOAuthIdentity,
   isSameOAuthIdentity,
   normalizeAuthEmailToken,
   normalizeAuthIdentityToken,
@@ -383,6 +384,89 @@ describe("isOAuthIdentityCompatible fuzz", () => {
         expect(isOAuthIdentityCompatible(a, b)).toBe(true);
       }
     }
+  });
+});
+
+describe("isSafeToMirrorOAuthIdentity (mirror direction: strict-but-upgrade-tolerant)", () => {
+  describe("positive matches and no-identity cases", () => {
+    it("accepts matching accountIds", () => {
+      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, { accountId: "x" })).toBe(true);
+    });
+
+    it("accepts matching emails (case-insensitive)", () => {
+      expect(
+        isSafeToMirrorOAuthIdentity({ email: "u@example.com" }, { email: "U@Example.com" }),
+      ).toBe(true);
+    });
+
+    it("accepts when both sides carry no identity metadata", () => {
+      expect(isSafeToMirrorOAuthIdentity({}, {})).toBe(true);
+    });
+  });
+
+  describe("upgrade direction is allowed (existing has no identity, incoming does)", () => {
+    it("accepts existing-no-accountId adopting incoming-accountId", () => {
+      expect(isSafeToMirrorOAuthIdentity({}, { accountId: "x" })).toBe(true);
+    });
+
+    it("accepts existing-no-email adopting incoming-email", () => {
+      expect(isSafeToMirrorOAuthIdentity({}, { email: "u@example.com" })).toBe(true);
+    });
+
+    it("accepts when only existing.email is present and incoming carries same email + added accountId", () => {
+      expect(
+        isSafeToMirrorOAuthIdentity(
+          { email: "u@example.com" },
+          { accountId: "x", email: "u@example.com" },
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe("regression direction is refused (incoming drops identity present on existing)", () => {
+    it("refuses incoming-no-accountId when existing has accountId", () => {
+      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, {})).toBe(false);
+    });
+
+    it("refuses incoming-no-email when existing has email", () => {
+      expect(isSafeToMirrorOAuthIdentity({ email: "u@example.com" }, {})).toBe(false);
+    });
+
+    it("refuses when existing.accountId is dropped even if incoming adds a new email", () => {
+      // incoming gains an email field but loses the accountId main already
+      // had. Losing the accountId marker would let future wrong-account
+      // sub-agents pass the relaxed adoption gate.
+      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, { email: "u@example.com" })).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("positive mismatch still refuses", () => {
+    it("refuses mismatching accountIds", () => {
+      expect(isSafeToMirrorOAuthIdentity({ accountId: "a" }, { accountId: "b" })).toBe(false);
+    });
+
+    it("refuses mismatching emails when both expose only email", () => {
+      expect(
+        isSafeToMirrorOAuthIdentity({ email: "a@example.com" }, { email: "b@example.com" }),
+      ).toBe(false);
+    });
+  });
+
+  describe("relationship to the other two gates", () => {
+    it("is strictly stricter than isOAuthIdentityCompatible (drops are refused)", () => {
+      // Compatible says yes (no positive-mismatch evidence), mirror-safe
+      // says no (identity regression). Pins the asymmetry.
+      expect(isOAuthIdentityCompatible({ accountId: "x" }, {})).toBe(true);
+      expect(isSafeToMirrorOAuthIdentity({ accountId: "x" }, {})).toBe(false);
+    });
+
+    it("is strictly more permissive than isSameOAuthIdentity (upgrades are allowed)", () => {
+      // Strict rule says no (asymmetric), mirror-safe says yes (upgrade).
+      expect(isSameOAuthIdentity({}, { accountId: "x" })).toBe(false);
+      expect(isSafeToMirrorOAuthIdentity({}, { accountId: "x" })).toBe(true);
+    });
   });
 });
 
