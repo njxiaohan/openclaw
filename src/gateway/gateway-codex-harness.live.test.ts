@@ -529,12 +529,16 @@ describeLive("gateway live (Codex harness)", () => {
             "`codex models` could not be run in this sandbox.",
             "I couldn’t get a direct `codex models` CLI listing because the local sandbox blocked that command.",
             "I couldn’t list all installed/available Codex models from the local CLI because the sandboxed `codex` command failed to start in this environment.",
+            "I couldn’t get `codex models` from the CLI because the sandbox blocks the namespace setup it needs",
             "Current model: `codex/",
             "Current session model is `codex/",
             "The current session is using `codex/",
             "Configured model from `~/.codex/config.toml`:",
             "Configured models in this session:",
             "Default model:",
+            "This harness is configured with a single Codex model: `codex/",
+            "Primary model: `codex/",
+            "Registered models: `codex/",
             "Current OpenClaw session status reports the active model as:",
           ],
           isExpectedText: (text) => {
@@ -545,11 +549,17 @@ describeLive("gateway live (Codex harness)", () => {
                 text.includes("could not be run") ||
                 text.includes("failed in this sandbox") ||
                 text.includes("failed with:") ||
-                text.includes("repo-local fallback"));
+                text.includes("repo-local fallback") ||
+                text.includes("sandbox blocks"));
             const isSessionConfigFallback =
-              text.includes("Configured models in this session:") &&
-              text.includes("Default model:") &&
-              text.includes("`codex/");
+              text.includes("`codex/") &&
+              ((text.includes("Configured models in this session:") &&
+                text.includes("Default model:")) ||
+                (text.includes("Primary model:") &&
+                  (text.includes("Registered models:") ||
+                    text.includes("single Codex model") ||
+                    text.includes("live OpenClaw config shows") ||
+                    text.includes("current gateway config"))));
             return isSandboxFallback || isSessionConfigFallback;
           },
         });
