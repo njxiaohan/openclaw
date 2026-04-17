@@ -438,6 +438,8 @@ describeLive("gateway live (Codex harness)", () => {
       if (CODEX_HARNESS_AUTH_MODE !== "api-key") {
         delete process.env.OPENAI_BASE_URL;
         delete process.env.OPENAI_API_KEY;
+      } else if (!process.env.OPENAI_BASE_URL?.trim()) {
+        delete process.env.OPENAI_BASE_URL;
       }
       process.env.OPENCLAW_CONFIG_PATH = configPath;
       process.env.OPENCLAW_GATEWAY_TOKEN = token;
