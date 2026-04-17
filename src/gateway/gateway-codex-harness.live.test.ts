@@ -524,6 +524,7 @@ describeLive("gateway live (Codex harness)", () => {
             "running as Codex on `codex/",
             "currently running on `codex/",
             "stdin is not a terminal",
+            "The local `codex models` entrypoint is interactive in this environment",
             "`codex models` did not run in this environment.",
             "`codex models` failed in this sandbox",
             "`codex models` could not be run in this sandbox.",
@@ -551,7 +552,8 @@ describeLive("gateway live (Codex harness)", () => {
                 text.includes("failed in this sandbox") ||
                 text.includes("failed with:") ||
                 text.includes("repo-local fallback") ||
-                text.includes("sandbox blocks"));
+                text.includes("sandbox blocks") ||
+                text.includes("interactive in this environment"));
             const mentionsConfiguredModels =
               normalized.includes("configured model") || normalized.includes("configured models");
             const mentionsSessionModel =
