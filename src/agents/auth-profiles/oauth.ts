@@ -126,7 +126,7 @@ function extractErrorMessage(error: unknown): string {
   return formatErrorMessage(error);
 }
 
-function isRefreshTokenReusedError(error: unknown): boolean {
+export function isRefreshTokenReusedError(error: unknown): boolean {
   const message = normalizeLowercaseStringOrEmpty(extractErrorMessage(error));
   return (
     message.includes("refresh_token_reused") ||
@@ -279,12 +279,12 @@ async function refreshOAuthTokenWithLock(params: {
  * refresh, since the credential has already been persisted to the agent's
  * own store and returned to the requester.
  */
-function normalizeAuthIdentityToken(value: string | undefined): string | undefined {
+export function normalizeAuthIdentityToken(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
 }
 
-function normalizeAuthEmailToken(value: string | undefined): string | undefined {
+export function normalizeAuthEmailToken(value: string | undefined): string | undefined {
   return normalizeAuthIdentityToken(value)?.toLowerCase();
 }
 
@@ -292,7 +292,7 @@ function normalizeAuthEmailToken(value: string | undefined): string | undefined 
  * Returns true if `existing` and `incoming` provably belong to the same
  * account. Used to gate cross-agent credential mirroring.
  */
-function isSameOAuthIdentity(
+export function isSameOAuthIdentity(
   existing: Pick<OAuthCredential, "accountId" | "email">,
   incoming: Pick<OAuthCredential, "accountId" | "email">,
 ): boolean {
