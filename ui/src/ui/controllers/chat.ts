@@ -116,7 +116,7 @@ export type ChatState = {
   lastError: string | null;
   // Track optimistically-added user messages that haven't been confirmed by the server yet.
   // Maps client-generated temp ID -> the pending message object.
-  pendingChatMessagesById: Map<string, unknown>;
+  pendingChatMessagesById?: Map<string, unknown>;
 };
 
 export type ChatEventPayload = {
@@ -230,9 +230,13 @@ export async function loadChatHistory(state: ChatState) {
     }
     // Preserve any pending messages even on error (strip their _tempId)
     if (state.pendingChatMessagesById && state.pendingChatMessagesById.size > 0) {
-      const pendingMsgs = [...state.pendingChatMessagesById.values()].map(
-        ({ _tempId: _1, ...msg }) => msg,
-      );
+      const pendingMsgs: unknown[] = [];
+      for (const pendingMsg of state.pendingChatMessagesById.values()) {
+        const msg = pendingMsg as Record<string, unknown>;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { _tempId: _1, ...rest } = msg;
+        pendingMsgs.push(rest);
+      }
       state.chatMessages = [...state.chatMessages, ...pendingMsgs];
       state.pendingChatMessagesById.clear();
     }
